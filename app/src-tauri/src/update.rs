@@ -326,21 +326,28 @@ fn install(installer: &Path) -> Result<(), String> {
 
     let exe = std::env::current_exe().map_err(|error| format!("locate this app: {error}"))?;
     // A script, because the sequence has to outlive the process being replaced:
-    // wait for the installer, then start what it installed.
+    // wait for the installer, then start what it installed. `timeout` gives the
+    // app a second to exit first - an installer that finds its own target
+    // running replaces the files anyway, but the relaunch would then race a
+    // half-written binary.
     let script = std::env::temp_dir().join("aidrone-update.cmd");
     std::fs::write(
         &script,
         format!(
-            "@echo off\r\n\"{}\" /S\r\nstart \"\" \"{}\"\r\n",
+            "@echo off\r\ntimeout /t 1 /nobreak >nul\r\n\"{}\" /S\r\nstart \"\" \"{}\"\r\n",
             installer.display(),
             exe.display()
         ),
     )
     .map_err(|error| format!("write the update script: {error}"))?;
 
+    // DETACHED_PROCESS is what makes it survive this app's exit.
     std::process::Command::new("cmd")
         .args(["/C", &script.to_string_lossy()])
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("start the installer: {error}"))?;
     Ok(())
@@ -410,18 +417,39 @@ fn install(package: &Path) -> Result<(), String> {
         }
     };
 
+    // The helper has to outlive the process that started it, and a plain child
+    // does not: it stays in this app's process group, and whatever supervises
+    // the app - a desktop session scope, a terminal, a test harness - takes the
+    // whole group down when the app exits. Measured: the script was written and
+    // never ran. `setsid` puts it in a session of its own; the second of sleep
+    // is so `apt` starts after the binary it is replacing has gone.
+    let log = std::env::temp_dir().join("aidrone-update.log");
     let script = std::env::temp_dir().join("aidrone-update.sh");
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\n{command} install -y --allow-downgrades '{}'\nexec '{}'\n",
+            "#!/bin/sh\nsleep 1\n{command} install -y --allow-downgrades '{}' >>'{}' 2>&1\nexec '{}'\n",
             package.display(),
+            log.display(),
             exe.display()
         ),
     )
     .map_err(|error| format!("write the update script: {error}"))?;
-    std::process::Command::new("sh")
-        .arg(&script)
+
+    let detached = which("setsid").is_some();
+    let mut helper = if detached {
+        let mut command = std::process::Command::new("setsid");
+        command.args(["sh", &script.to_string_lossy()]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command.arg(&script);
+        command
+    };
+    helper
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("start the installer: {error}"))?;
     Ok(())
