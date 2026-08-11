@@ -1,0 +1,131 @@
+/* Ground-station chrome.
+ *
+ * Tailwind 4 only - no component library. v4 has no config file: the design
+ * tokens below ARE the config, and `@theme` turns each one into a utility
+ * (`--color-accent` -> `bg-accent` / `text-accent` / `border-accent`). So the
+ * palette lives in one place and the markup never carries a hex code.
+ *
+ * Fonts are bundled, not fetched. A ground station is used on a USB-NCM link
+ * with no route to the internet, and a webfont that fails at launch changes
+ * every metric on screen at exactly the wrong moment. The KR faces are the
+ * unicode-range-split builds, so the disk holds every chunk and the renderer
+ * loads only the handful a screen actually needs.
+ */
+@import "tailwindcss";
+
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "@fontsource/ibm-plex-sans-kr/400.css";
+@import "@fontsource/ibm-plex-sans-kr/500.css";
+@import "@fontsource/ibm-plex-sans-kr/600.css";
+
+@theme {
+  /* Surfaces, darkest to lightest. `stage` is behind the video and is the only
+     one that must never be lifted - anything brighter shows as a halo around a
+     letterboxed 4:3 frame. */
+  --color-stage: #08090b;
+  --color-bg: #0b0d10;
+  --color-sunken: #0f1216;
+  --color-panel: #101318;
+  --color-raised: #14171c;
+  --color-tile: #131820;
+  --color-chip: #151a20;
+  --color-key: #1b2128;
+  --color-btn: #1e242c;
+
+  /* Hairlines. Three weights: outer frame, inner divider, card edge. */
+  --color-line: #1f242b;
+  --color-line2: #1c2128;
+  --color-line3: #262b33;
+  --color-line4: #313943;
+
+  /* Text, brightest to faintest. */
+  --color-ink: #e6e9ee;
+  --color-ink2: #c6ccd5;
+  --color-dim: #8a929e;
+  --color-dim2: #5a626e;
+  --color-dim3: #454c56;
+
+  /* Status. Cyan is the app, green is healthy, amber is attention, red is
+     stop - and nothing else may use red. */
+  --color-accent: #5bc8f5;
+  --color-accent2: #7fd6f8;
+  --color-ok: #5be0a0;
+  --color-ok2: #8de9bf;
+  --color-warn: #f5c05b;
+  --color-alert: #ff6b6b;
+  --color-alert2: #ff8b8b;
+
+  --font-sans: "IBM Plex Sans KR", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --animate-beat: beat 2.2s ease-in-out infinite;
+  --animate-beat-fast: beat 1.4s ease-in-out infinite;
+  --animate-spin-slow: spin 0.8s linear infinite;
+
+  @keyframes beat {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.2;
+    }
+  }
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Every readout is a number that changes 10x a second. Proportional digits
+     make the whole row twitch as they do. */
+  input {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  input:focus {
+    outline: none;
+  }
+
+  input::placeholder {
+    color: #4e5661;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #252b34;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* The one thing utilities cannot express: the canvas must letterbox its own
+   4:3 backing store inside whatever box the layout gives it. `object-fit`
+   works on <canvas> only because width/height attributes give it an intrinsic
+   size - never size this in CSS pixels. */
+#video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #0e1114;
+}

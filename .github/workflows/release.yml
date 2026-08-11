@@ -1,0 +1,146 @@
+name: Build and publish desktop prereleases
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows NSIS installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM for bindgen
+        shell: pwsh
+        run: choco install llvm --no-progress --yes
+
+      - name: Download shared FFmpeg
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip' `
+            -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $extract
+          $ffmpeg = Get-ChildItem -Path $extract -Directory | Select-Object -First 1
+          if ($null -eq $ffmpeg) { throw 'shared FFmpeg archive had no root directory' }
+          $libclang = Get-ChildItem -Path 'C:\Program Files\LLVM' -Recurse -Filter libclang.dll |
+            Select-Object -First 1
+          if ($null -eq $libclang) { throw 'LLVM installation did not provide libclang.dll' }
+          "FFMPEG_DIR=$($ffmpeg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=$($libclang.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Stage DirectML redistributable
+        shell: pwsh
+        run: |
+          $version = '1.15.4'
+          $archive = Join-Path $env:RUNNER_TEMP "Microsoft.AI.DirectML.$version.nupkg"
+          $extract = Join-Path $env:RUNNER_TEMP 'directml'
+          Invoke-WebRequest `
+            -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/$version/microsoft.ai.directml.$version.nupkg" `
+            -OutFile $archive
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          tar -xf $archive -C $extract
+          $source = Join-Path $extract 'bin\x64-win\DirectML.dll'
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw 'Microsoft.AI.DirectML did not contain bin/x64-win/DirectML.dll'
+          }
+          $destination = Join-Path $env:GITHUB_WORKSPACE 'app\src-tauri\target\release'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: bun install --frozen-lockfile
+
+      - name: Build NSIS installer
+        working-directory: app
+        run: bun run tauri build --bundles nsis
+
+      - name: Verify installer wiring
+        working-directory: app
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/installer/windows/verify-nsis.ps1
+
+      - name: Collect Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis
+          path: app/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  ubuntu:
+    name: Ubuntu 22.04 packages
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libasound2-dev clang libclang-dev cmake \
+            build-essential pkg-config libssl-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswresample-dev libswscale-dev
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: bun install --frozen-lockfile
+
+      - name: Build release-specific Debian package
+        working-directory: app
+        run: bash src-tauri/installer/linux/build-deb.sh
+
+      - name: Build AppImage
+        working-directory: app
+        run: bun run tauri build --bundles appimage
+
+      - name: Collect Ubuntu packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-22-packages
+          path: |
+            app/src-tauri/target/release/bundle/deb/*.deb
+            app/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub prerelease
+    needs: [windows, ubuntu]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish commit build
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.sha }}
+          name: Continuous build ${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          generate_release_notes: true
+          make_latest: false
+          files: release-assets/**/*
+          fail_on_unmatched_files: true

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer/windows/hooks.nsh",
+        "installMode": "perMachine"
+      }
+    },
+    "resources": {
+      "models/yolo26n.onnx": "models/yolo26n.onnx",
+      "models/ggml-base-q5_1.bin": "models/ggml-base-q5_1.bin",
+      "installer/windows/aidrone-link.ps1": "installer/windows/aidrone-link.ps1",
+
+      "target/release/avcodec-*.dll": "",
+      "target/release/avformat-*.dll": "",
+      "target/release/avutil-*.dll": "",
+      "target/release/swresample-*.dll": "",
+      "target/release/swscale-*.dll": "",
+      "target/release/DirectML.dll": "",
+      "directml/LICENSE.txt": "directml/LICENSE.txt",
+      "directml/ThirdPartyNotices.txt": "directml/ThirdPartyNotices.txt",
+      "onnxruntime/windows-x64/onnxruntime.dll": "onnxruntime/windows-x64/onnxruntime.dll",
+      "onnxruntime/windows-x64/onnxruntime_providers_shared.dll": "onnxruntime/windows-x64/onnxruntime_providers_shared.dll",
+      "onnxruntime/LICENSE": "onnxruntime/LICENSE",
+      "onnxruntime/ThirdPartyNotices.txt": "onnxruntime/ThirdPartyNotices.txt"
+    }
+  }
+}

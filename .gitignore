@@ -1,0 +1,14 @@
+# Local credentials and per-device provisioning
+/.env
+/.env.*
+!/.env.example
+/firmware/src/config.h
+
+# Generated firmware output
+/firmware/.pio/
+
+# Workstation-local and generated root artifacts
+/.probe.ps1
+/.installer.nsi
+/.schema.json
+/드론 제어 데스크톱 앱 프로토타입.zip

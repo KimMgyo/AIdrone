@@ -1,0 +1,60 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "Tello viewer over the USB-NCM cable - Rust owns the drone link, WebCodecs owns decode"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Two reasons for a git pin rather than the 9.0.0 release, and both are
+# load-bearing:
+#   - the Windows FFmpeg master snapshot exposes a newer side-data enum than
+#     the release-version guard expects, which `non-exhaustive-enums` absorbs;
+#   - every FFmpeg older than 7.0 selects this crate's `legacy_*` modules, and
+#     until `ede2410f` those still carried edition-2015 `use ffi::*` paths
+#     against a crate declaring edition 2024 - a hard compile error. That is
+#     invisible on Windows, which builds against master, and fatal on every
+#     Ubuntu LTS: 22.04 ships FFmpeg 4.4 (16 errors) and 24.04 ships 6.1 (1).
+# Pinned rather than tracking master so bindgen output stays reproducible.
+# `format` is needed internally by ffmpeg-next's scaler module.
+ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", rev = "3751e2800d5d2f0215d69031285aadebac5db8fc", default-features = false, features = ["codec", "format", "software-scaling", "non-exhaustive-enums"] }
+# Native detector parity with the former JS path. `simd` selects the crate's
+# x86-64 native implementation instead of its scalar dispatcher.
+aruco-rs = { version = "=0.1.0", features = ["simd"] }
+# AprilTag 3's raw ABI is wrapped locally so the current MIP codebook stays
+# identical to the existing `aruco-rs` baseline.
+apriltag-sys = "=0.4.0"
+# `download-binaries` statically links pyke's runtime, whose glibc 2.38
+# baseline cannot link on Ubuntu 22.04. The official 1.28.0 CPU libraries are
+# bundled as platform resources and loaded explicitly before the first session.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-27"] }
+# The copilot's model proxy. rustls, not native-tls: the app already ships a
+# self-contained binary and a system OpenSSL is one more thing to be missing.
+# `stream` hands back a byte stream instead of one buffered body, which is what
+# lets a reply be shown while it is still being written.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# Only the `StreamExt::next` used to pull that stream.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Only for the retry backoff; Tauri's runtime is already tokio.
+tokio = { version = "1", features = ["time"] }
+# Speech to text, and the reason it is native rather than a WebView API: the
+# app ships on Windows AND Ubuntu, WebKitGTK has no `SpeechRecognition` at all,
+# and a cloud STT would need a provider the router does not have connected.
+# whisper.cpp runs the same on both and needs no key and no network.
+cpal = "0.15"
+whisper-rs = { version = "0.14", default-features = false }

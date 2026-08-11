@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>AIdrone Station</title>
+    <!-- Module scripts are deferred, so the two roots below are parsed before
+         main.ts runs and it can fill them without waiting. -->
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+
+  <body>
+    <!-- Both screens are built once and swapped by display, never re-created:
+         the station holds the canvas the decoder paints into, and tearing that
+         down on every disconnect would drop the WebCodecs config with it. -->
+    <div
+      class="h-screen min-h-[640px] min-w-[1024px] flex flex-col overflow-hidden bg-bg text-ink"
+    >
+      <div id="landing" class="flex-1 min-h-0 overflow-hidden flex flex-col"></div>
+      <div id="station" class="flex-1 min-h-0 flex-col" style="display: none"></div>
+    </div>
+  </body>
+</html>

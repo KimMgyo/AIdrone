@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "models/yolo26n.onnx": "models/yolo26n.onnx",
+      "models/ggml-base-q5_1.bin": "models/ggml-base-q5_1.bin",
+      "onnxruntime/linux-x64/libonnxruntime.so.1.28.0": "onnxruntime/linux-x64/libonnxruntime.so.1.28.0",
+      "onnxruntime/linux-x64/libonnxruntime_providers_shared.so": "onnxruntime/linux-x64/libonnxruntime_providers_shared.so",
+      "onnxruntime/LICENSE": "onnxruntime/LICENSE",
+      "onnxruntime/ThirdPartyNotices.txt": "onnxruntime/ThirdPartyNotices.txt"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libasound2",
+          "libavcodec60",
+          "libavutil58",
+          "libswscale7",
+          "libjavascriptcoregtk-4.1-0",
+          "libsoup-3.0-0"
+        ],
+        "recommends": [
+          "network-manager"
+        ],
+        "files": {
+          "/usr/lib/aidrone/installer/70-aidrone-ncm.rules": "installer/linux/70-aidrone-ncm.rules",
+          "/usr/lib/aidrone/installer/aidrone.nmconnection": "installer/linux/aidrone.nmconnection"
+        },
+        "postInstallScript": "installer/linux/postinst",
+        "postRemoveScript": "installer/linux/postrm"
+      }
+    }
+  }
+}

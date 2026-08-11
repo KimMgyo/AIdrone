@@ -1,0 +1,22 @@
+#pragma once
+
+// Copy this file to config.h, then replace and uncomment the two deployment
+// credentials below. config.h is intentionally ignored: it provisions the
+// Tello-facing Soft-AP and must never be committed.
+// #define AIDRONE_WIFI_SSID "replace-with-deployment-ssid"
+// #define AIDRONE_WIFI_PASS "replace-with-deployment-passphrase"
+
+#ifndef AIDRONE_WIFI_SSID
+#error "Define AIDRONE_WIFI_SSID in firmware/src/config.h before building"
+#endif
+#ifndef AIDRONE_WIFI_PASS
+#error "Define AIDRONE_WIFI_PASS in firmware/src/config.h before building"
+#endif
+
+#define AP_SSID AIDRONE_WIFI_SSID
+#define AP_PASS AIDRONE_WIFI_PASS
+#define AP_CHANNEL 6
+
+#define BENCH_PORT 9999
+#define BENCH_PAYLOAD 1450
+#define NCM_RING_BYTES (64 * 1024)

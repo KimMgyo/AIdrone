@@ -1,0 +1,12 @@
+# The repository builds shell scripts on Ubuntu and runs PowerShell on Windows.
+# Keep source text LF everywhere; Windows PowerShell accepts it.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary
+*.onnx binary
+*.bin binary
+*.dll binary
+*.so binary
+*.h264 binary
