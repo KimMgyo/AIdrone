@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.10_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.11_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -221,6 +221,42 @@ loaded `gstreamer1.0-libav` H.264 decoder, so it is not a supported portable
 distribution for this application. Use the `.deb` for a normal plug-and-play
 Ubuntu install.
 
+### Updating itself
+
+On launch the app asks GitHub for this project's newest release, and offers it
+on the landing screen when it is newer than the running build. Accepting it
+downloads the artifact for this exact platform, checks the SHA-256 GitHub
+publishes beside it, installs, and restarts.
+
+It is hand-written (`src-tauri/src/update.rs`) rather than
+`tauri-plugin-updater` for one reason: the plugin cannot update a `.deb`, and
+on Ubuntu the `.deb` is the only artifact that can declare
+`gstreamer1.0-libav` and run the USB-NCM maintainer scripts.
+
+What it will and will not do:
+
+- **Only from the landing screen.** The installer replaces the binary
+  underneath a running process, so the button is disabled while a probe or a
+  connect is in flight, and there is no path to it during a session.
+- **Only an artifact it can check.** An asset GitHub reports no digest for is
+  not offered at all, and a download whose SHA-256 does not match is deleted
+  rather than installed. This is integrity, not provenance: it proves the bytes
+  are the ones GitHub holds. Signed updates would need a signing key in CI.
+- **Only this project's releases.** The download URL is required to sit under
+  `https://github.com/KimMgyo/AIdrone/releases/download/`.
+- **Only the matching Ubuntu.** `/etc/os-release` picks `_ubuntu22`, `_ubuntu24`
+  or `_ubuntu26`; an unrecognised distribution is offered nothing, because the
+  wrong libc baseline is worse than an old build.
+- **One OS prompt, unavoidable.** Windows raises UAC for the per-machine NSIS
+  installer; Linux takes the cheapest root available - already root, then
+  passwordless `sudo`, then `pkexec`'s desktop dialog - and says so plainly
+  when it has none of them.
+
+`AIDRONE_UPDATE_DRY_RUN=1` stops after the checksum and reports where the
+artifact landed. It exists because the install step is the one part that cannot
+run unattended: UAC lives on Windows' secure desktop, which no automation may
+touch.
+
 ### Doing it by hand
 
 Only needed when running from a source build rather than an installed package.
@@ -251,8 +287,8 @@ subnet once a second and prints anything that answers.
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.10_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.10_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.11_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.11_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -305,7 +341,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.10_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.11_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:
