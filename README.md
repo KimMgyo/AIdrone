@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.0_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.1_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -219,8 +219,8 @@ subnet once a second and prints anything that answers.
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.0_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.0_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.1_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.1_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -273,7 +273,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.0_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.1_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:

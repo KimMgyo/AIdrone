@@ -556,6 +556,12 @@ async function doConnect(): Promise<void> {
     vision.setSessionLive(true);
     await connect();
     nativeSessionStarted = true;
+    // Show the station as soon as frames are flowing, not after the first one
+    // paints: decode start-up is seconds on a cold link, and a landing screen
+    // that sits still for that long reads as a hang. Controls stay disabled
+    // until the frame has actually painted below, and the catch puts the
+    // landing screen back if it never does.
+    showStation(true);
     landing.log("[link] native video flow confirmed · waiting for canvas paint");
     await waitForFirstPaint(renderer);
 
@@ -569,7 +575,6 @@ async function doConnect(): Promise<void> {
     consolePanel.push("info", `session up with painted video in ${ms} ms`);
     keymap.setEnabled(mode === "key");
     consolePanel.setEnabled(true);
-    showStation(true);
   } catch (err) {
     // This runs while the native session is still present, so stopping a live
     // follow loop can deliver its neutral RC before disconnect tears sockets
@@ -591,6 +596,7 @@ async function doConnect(): Promise<void> {
     renderer?.close();
     renderer = null;
     vision.setSessionLive(false);
+    showStation(false);
     landing.log(`[err] ${errText(err)}`);
     status = "idle";
     busy = false;
