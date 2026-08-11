@@ -1320,6 +1320,55 @@ the platform that was already healthy nothing.
 | real Tello, after the fix | **5.2 / 11.0 ms** | 2.8 / 6.2 ms | **0** |
 | real Tello, next session | **3.7 / 9.7 ms** | 1.8 / 3.7 ms | **0 of 1658** |
 
+### The three things behind Ubuntu's remaining latency
+
+With the DPB fixed, a real drone on Ubuntu 26.04 still read 530 ms, then 30,
+then 18. Each step was a different defect, and the last one was invisible to
+every number on screen. The order matters, because each was only findable once
+the one before it was gone.
+
+**1. The SPS rewrite never ran on the drone (530 ms).** Captured off the wire
+at 192.168.4.2, the Tello sends its parameter sets in datagrams of their own:
+
+```
+nal type  7 (SPS) at byte  1 in datagram 0 (len 13)
+nal type  8 (PPS) at byte 14 in datagram 1 (len 8)
+nal type  5 (IDR) at byte 22 in datagram 2 (len 1022)
+```
+
+`with_low_delay_sps` only rewrote an SPS that a following start code proved
+complete, so the 13-byte datagram was skipped every time - the fix worked in
+every test and never once on the drone. An SPS that ends its buffer now proves
+itself through its own `rbsp_trailing_bits`; a truncated one still cannot, and
+is left alone. The drone's real SPS is a test fixture (`REAL_TELLO_SPS`).
+
+**2. `requestAnimationFrame` charged a whole refresh (30 -> 18 ms).** The
+laptop runs Wayland at 3840x2160 **60 Hz**. A frame that lands just after a
+frame callback waits out the entire next interval before rAF runs. Painting
+inside `onDecoded` costs at most one extra `drawImage` when two decoder outputs
+land in one refresh - the compositor shows the last one either way. Windows,
+at 144 Hz, went 6.7 -> 2.5 ms on the same change.
+
+**3. Every picture waited for the next one, and no number showed it.**
+Annex-B has no length prefix, so a NAL is only provably complete when the NEXT
+start code arrives - and the Tello sends one slice per picture. Picture N sat
+in `pending` until picture N+1 landed ~35 ms later, and was then stamped with
+**N+1's** arrival, so the wait cancelled out of every measurement taken.
+`video.rs` already knows where a picture ends (the drone's short datagram
+delimits its batches), so both reassemblers now take that boundary:
+`H264Stream.push(..., endOfBatch)` and `H264AccessUnitAssembler::push(...,
+end_of_batch)`. The native detector was a frame late for the same reason.
+
+The honest consequence: **the displayed number barely moved and the picture
+got visibly better**, because what was removed had never been counted.
+
+**What the status bar now separates.** `IPC` is Rust's arrival stamp to the
+WebView's hands, `DEC` is `decode()` to `output()`, and `RECV→PAINT` is the
+whole thing; the remainder is ours. On the drone, on that laptop: 2 / 9 / 18.
+The 9 ms is WebKitGTK's own libav decode on an i7-10750H - roughly nine times
+the same decode on a 13700K, and the only remaining lever there is moving
+decode into Rust on Linux, which trades the WebCodecs architecture for it.
+
 ### Three more defects the same session turned up
 
 3. **A reload wedged the app permanently.** The webview reloads; the Rust
