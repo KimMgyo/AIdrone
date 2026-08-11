@@ -241,7 +241,17 @@ fn recv_loop<F: Fn(Frame)>(
 
         // Hand the batch away and keep its capacity for the next one.
         let cap = frame.capacity();
-        let data = std::mem::replace(&mut frame, Vec::with_capacity(cap));
+        let mut data = std::mem::replace(&mut frame, Vec::with_capacity(cap));
+
+        // The Tello's SPS declares no VUI, so every decoder downstream has to
+        // assume the level's whole DPB may be reordered and buffers 12 pictures
+        // before releasing the first (502 ms receive-to-paint, README). Give it
+        // the truth here, once per IDR, where both the WebView and the native
+        // vision decoder see it. A stream that already declares its own
+        // reordering is left exactly as it arrived.
+        if let Some(patched) = crate::h264::with_low_delay_sps(&data) {
+            data = patched;
+        }
 
         counters
             .frame_max

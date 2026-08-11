@@ -76,6 +76,14 @@ const fps = Number(arg("fps", "30"));
 /// raise it to re-run that case on demand.
 const bundle = Number(arg("bundle", "1"));
 let battery = Number(arg("battery", "87"));
+/// Re-shape the SPS like the real drone's: drop its VUI. x264 writes
+/// `max_num_reorder_frames = 0`, which tells every decoder it may emit each
+/// picture the moment it is decoded; the Tello writes no VUI at all, and a
+/// decoder then has to assume the level's whole DPB may be reordered (12
+/// frames at 960x720 level 4.0) and buffers that many before the first one
+/// comes out. That is the 502 ms receive-to-paint the README chased, and
+/// without this flag no simulator run can reproduce it.
+const stripVui = process.argv.includes("--strip-vui");
 
 // --- the stream -------------------------------------------------------------
 
@@ -127,6 +135,161 @@ function accessUnits(bs: Uint8Array): Uint8Array[] {
   if (start < bs.length) out.push(bs.subarray(start));
   return out;
 }
+
+// --- SPS surgery (only under --strip-vui) ------------------------------------
+
+/** RBSP bit reader: Annex-B emulation-prevention bytes are already gone. */
+class Bits {
+  private at = 0;
+  constructor(private readonly rbsp: Uint8Array) {}
+  get position(): number {
+    return this.at;
+  }
+  u1(): number {
+    const bit = (this.rbsp[this.at >> 3]! >> (7 - (this.at & 7))) & 1;
+    this.at++;
+    return bit;
+  }
+  u(n: number): number {
+    let v = 0;
+    for (let i = 0; i < n; i++) v = (v << 1) | this.u1();
+    return v;
+  }
+  /** Unsigned exp-Golomb. */
+  ue(): number {
+    let zeros = 0;
+    while (this.u1() === 0 && zeros < 32) zeros++;
+    return zeros === 0 ? 0 : (1 << zeros) - 1 + this.u(zeros);
+  }
+  se(): number {
+    const k = this.ue();
+    return k % 2 === 0 ? -(k / 2) : (k + 1) / 2;
+  }
+}
+
+/** Drops emulation-prevention bytes (00 00 03 -> 00 00). */
+function toRbsp(nal: Uint8Array): Uint8Array {
+  const out = new Uint8Array(nal.length);
+  let n = 0;
+  for (let i = 0; i < nal.length; i++) {
+    if (i >= 2 && nal[i] === 3 && nal[i - 1] === 0 && nal[i - 2] === 0) continue;
+    out[n++] = nal[i]!;
+  }
+  return out.subarray(0, n);
+}
+
+/** Re-inserts them, so the result is a legal NAL payload again. */
+function toNal(rbsp: Uint8Array): Uint8Array {
+  const out: number[] = [];
+  let zeros = 0;
+  for (const byte of rbsp) {
+    if (zeros >= 2 && byte <= 3) {
+      out.push(3);
+      zeros = 0;
+    }
+    out.push(byte);
+    zeros = byte === 0 ? zeros + 1 : 0;
+  }
+  return new Uint8Array(out);
+}
+
+/**
+ * Bit offset of `vui_parameters_present_flag` inside an SPS RBSP (header byte
+ * included), or -1 if this SPS uses a shape this walker does not cover. Field
+ * order is ITU-T H.264 7.3.2.1.1 and stops at the flag - nothing past it is
+ * needed, because stripping means truncating exactly there.
+ */
+function vuiFlagOffset(rbsp: Uint8Array): number {
+  const bits = new Bits(rbsp);
+  bits.u(8); // NAL header
+  const profile = bits.u(8);
+  bits.u(8); // constraint flags + reserved
+  bits.u(8); // level_idc
+  bits.ue(); // seq_parameter_set_id
+
+  if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
+    const chroma = bits.ue();
+    if (chroma === 3) bits.u1();
+    bits.ue(); // bit_depth_luma_minus8
+    bits.ue(); // bit_depth_chroma_minus8
+    bits.u1(); // qpprime_y_zero_transform_bypass_flag
+    if (bits.u1() === 1) return -1; // scaling lists: not needed for a Tello-shaped SPS
+  }
+
+  bits.ue(); // log2_max_frame_num_minus4
+  const pocType = bits.ue();
+  if (pocType === 0) bits.ue();
+  else if (pocType === 1) {
+    bits.u1();
+    bits.se();
+    bits.se();
+    const cycle = bits.ue();
+    for (let i = 0; i < cycle; i++) bits.se();
+  }
+  bits.ue(); // max_num_ref_frames
+  bits.u1(); // gaps_in_frame_num_value_allowed_flag
+  bits.ue(); // pic_width_in_mbs_minus1
+  bits.ue(); // pic_height_in_map_units_minus1
+  if (bits.u1() === 0) bits.u1(); // frame_mbs_only_flag -> mb_adaptive_frame_field_flag
+  bits.u1(); // direct_8x8_inference_flag
+  if (bits.u1() === 1) {
+    bits.ue();
+    bits.ue();
+    bits.ue();
+    bits.ue();
+  }
+  return bits.position;
+}
+
+/** Copies `count` bits out of `rbsp`, appends the rbsp_trailing_bits stop bit. */
+function truncateAt(rbsp: Uint8Array, count: number): Uint8Array {
+  const out = new Uint8Array(((count + 1 + 7) >> 3) + 1);
+  for (let i = 0; i < count; i++) {
+    const bit = (rbsp[i >> 3]! >> (7 - (i & 7))) & 1;
+    if (bit) out[i >> 3]! |= 1 << (7 - (i & 7));
+  }
+  // vui_parameters_present_flag = 0, then the stop bit; the rest is zero
+  // padding, which is exactly rbsp_trailing_bits.
+  const stop = count + 1;
+  out[stop >> 3]! |= 1 << (7 - (stop & 7));
+  return out.subarray(0, (stop >> 3) + 1);
+}
+
+/** Rewrites every SPS in the file so it declares no VUI. */
+function stripVuiFromSps(bs: Uint8Array): Uint8Array {
+  const codes = startCodes(bs);
+  const pieces: Uint8Array[] = [];
+  let stripped = 0;
+  for (let k = 0; k < codes.length; k++) {
+    const from = codes[k]!.sc;
+    const to = k + 1 < codes.length ? codes[k + 1]!.sc : bs.length;
+    const headerAt = codes[k]!.nal;
+    if ((bs[headerAt]! & 0x1f) !== 7) {
+      pieces.push(bs.subarray(from, to));
+      continue;
+    }
+    const rbsp = toRbsp(bs.subarray(headerAt, to));
+    const offset = vuiFlagOffset(rbsp);
+    if (offset < 0) {
+      pieces.push(bs.subarray(from, to));
+      continue;
+    }
+    const prefix = bs.subarray(from, headerAt);
+    pieces.push(prefix, toNal(truncateAt(rbsp, offset)));
+    stripped++;
+  }
+  console.log(`[sim] --strip-vui: ${stripped} SPS rewritten to carry no VUI (Tello shape)`);
+  const total = pieces.reduce((sum, piece) => sum + piece.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const piece of pieces) {
+    out.set(piece, at);
+    at += piece.length;
+  }
+  return out;
+}
+
+if (stripVui) bytes = stripVuiFromSps(bytes);
 
 const frames = accessUnits(bytes);
 if (frames.length === 0) {

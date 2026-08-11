@@ -471,6 +471,288 @@ fn contains_idr(annex_b: &[u8]) -> bool {
     nal_kinds(annex_b).idr
 }
 
+// -----------------------------------------------------------------------------
+// Low-delay SPS rewriting.
+//
+// The Tello's SPS carries no VUI. A decoder handed one has to assume the
+// LEVEL's whole DPB may be reordered - at 960x720 level 4.0 that is
+// min(32768 / 2700, 16) = 12 frames - and so it buffers twelve pictures before
+// releasing the first. Measured end to end: 502 ms receive-to-paint on the real
+// drone, and 209 ms against the simulator's `--strip-vui` mode, against ~10 ms
+// once a VUI says the stream never reorders. Nothing in the WebCodecs config
+// reaches this: `optimizeForLatency` is a hint Chromium's hardware path and
+// WebKitGTK both ignore.
+//
+// The stream itself is the only place the answer belongs, so every SPS that
+// declares no VUI gets one on the way out: `max_num_reorder_frames = 0`, which
+// is the truth for a Tello (baseline-shaped, no B-frames, one slice per
+// picture) and is what every decoder needs to emit each picture as it lands.
+// -----------------------------------------------------------------------------
+
+/// Profiles whose SPS carries the extra chroma/scaling-list block.
+const HIGH_PROFILES: [u32; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
+
+struct BitReader<'a> {
+    rbsp: &'a [u8],
+    at: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(rbsp: &'a [u8]) -> Self {
+        Self { rbsp, at: 0 }
+    }
+
+    fn position(&self) -> usize {
+        self.at
+    }
+
+    fn u1(&mut self) -> Option<u32> {
+        let byte = *self.rbsp.get(self.at / 8)?;
+        let bit = (byte >> (7 - (self.at % 8))) & 1;
+        self.at += 1;
+        Some(u32::from(bit))
+    }
+
+    fn u(&mut self, count: u32) -> Option<u32> {
+        let mut value = 0;
+        for _ in 0..count {
+            value = (value << 1) | self.u1()?;
+        }
+        Some(value)
+    }
+
+    /// Unsigned exp-Golomb. Bounded at 32 leading zeros so a corrupt NAL ends
+    /// the walk instead of running off the buffer.
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.u1()? == 0 {
+            zeros += 1;
+            if zeros > 32 {
+                return None;
+            }
+        }
+        if zeros == 0 {
+            return Some(0);
+        }
+        Some((1 << zeros) - 1 + self.u(zeros)?)
+    }
+
+    fn se(&mut self) -> Option<i32> {
+        let k = self.ue()?;
+        Some(if k % 2 == 0 {
+            -((k / 2) as i32)
+        } else {
+            ((k + 1) / 2) as i32
+        })
+    }
+}
+
+#[derive(Default)]
+struct BitWriter {
+    rbsp: Vec<u8>,
+    at: usize,
+}
+
+impl BitWriter {
+    fn bit(&mut self, bit: u32) {
+        if self.at % 8 == 0 {
+            self.rbsp.push(0);
+        }
+        if bit != 0 {
+            let index = self.at / 8;
+            self.rbsp[index] |= 1 << (7 - (self.at % 8));
+        }
+        self.at += 1;
+    }
+
+    fn copy_bits(&mut self, source: &[u8], count: usize) {
+        for index in 0..count {
+            let byte = source[index / 8];
+            self.bit(u32::from((byte >> (7 - (index % 8))) & 1));
+        }
+    }
+
+    fn ue(&mut self, value: u32) {
+        let coded = value + 1;
+        let width = 32 - coded.leading_zeros();
+        for _ in 0..width - 1 {
+            self.bit(0);
+        }
+        for shift in (0..width).rev() {
+            self.bit((coded >> shift) & 1);
+        }
+    }
+
+    /// rbsp_trailing_bits: a stop bit, then zero padding to the byte boundary.
+    fn finish(mut self) -> Vec<u8> {
+        self.bit(1);
+        while self.at % 8 != 0 {
+            self.bit(0);
+        }
+        self.rbsp
+    }
+}
+
+/// Drops emulation-prevention bytes: `00 00 03` -> `00 00`.
+fn rbsp_from_nal(nal: &[u8]) -> Vec<u8> {
+    let mut rbsp = Vec::with_capacity(nal.len());
+    let mut zeros = 0;
+    for &byte in nal {
+        if zeros >= 2 && byte == 3 {
+            zeros = 0;
+            continue;
+        }
+        rbsp.push(byte);
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+    }
+    rbsp
+}
+
+/// Puts them back, so the result is a legal NAL payload again.
+fn nal_from_rbsp(rbsp: &[u8]) -> Vec<u8> {
+    let mut nal = Vec::with_capacity(rbsp.len() + 4);
+    let mut zeros = 0;
+    for &byte in rbsp {
+        if zeros >= 2 && byte <= 3 {
+            nal.push(3);
+            zeros = 0;
+        }
+        nal.push(byte);
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+    }
+    nal
+}
+
+/// Bit offset of `vui_parameters_present_flag` in an SPS RBSP, plus the
+/// `max_num_ref_frames` the DPB floor needs. Field order is ITU-T H.264
+/// 7.3.2.1.1; the walk stops at the flag because nothing after it is copied.
+fn sps_vui_flag_offset(rbsp: &[u8]) -> Option<(usize, u32)> {
+    let mut bits = BitReader::new(rbsp);
+    bits.u(8)?; // NAL header
+    let profile = bits.u(8)?;
+    bits.u(8)?; // constraint_set flags + reserved
+    bits.u(8)?; // level_idc
+    bits.ue()?; // seq_parameter_set_id
+
+    if HIGH_PROFILES.contains(&profile) {
+        if bits.ue()? == 3 {
+            bits.u1()?; // separate_colour_plane_flag
+        }
+        bits.ue()?; // bit_depth_luma_minus8
+        bits.ue()?; // bit_depth_chroma_minus8
+        bits.u1()?; // qpprime_y_zero_transform_bypass_flag
+        if bits.u1()? == 1 {
+            // Scaling lists would have to be walked element by element. No
+            // Tello emits them, and guessing is worse than leaving the SPS
+            // exactly as it arrived.
+            return None;
+        }
+    }
+
+    bits.ue()?; // log2_max_frame_num_minus4
+    match bits.ue()? {
+        0 => {
+            bits.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+        }
+        1 => {
+            bits.u1()?; // delta_pic_order_always_zero_flag
+            bits.se()?; // offset_for_non_ref_pic
+            bits.se()?; // offset_for_top_to_bottom_field
+            let cycle = bits.ue()?;
+            for _ in 0..cycle {
+                bits.se()?;
+            }
+        }
+        _ => {}
+    }
+
+    let max_num_ref_frames = bits.ue()?;
+    bits.u1()?; // gaps_in_frame_num_value_allowed_flag
+    bits.ue()?; // pic_width_in_mbs_minus1
+    bits.ue()?; // pic_height_in_map_units_minus1
+    if bits.u1()? == 0 {
+        bits.u1()?; // mb_adaptive_frame_field_flag
+    }
+    bits.u1()?; // direct_8x8_inference_flag
+    if bits.u1()? == 1 {
+        for _ in 0..4 {
+            bits.ue()?; // frame_crop_*_offset
+        }
+    }
+
+    Some((bits.position(), max_num_ref_frames))
+}
+
+/// Returns this SPS with a `max_num_reorder_frames = 0` VUI, or None when it
+/// already declares a VUI (its author's own answer wins) or cannot be walked.
+fn sps_with_low_delay_vui(nal: &[u8]) -> Option<Vec<u8>> {
+    let rbsp = rbsp_from_nal(nal);
+    let (vui_flag_at, max_num_ref_frames) = sps_vui_flag_offset(&rbsp)?;
+    let mut bits = BitReader::new(&rbsp);
+    bits.u(vui_flag_at as u32)?;
+    if bits.u1()? == 1 {
+        return None;
+    }
+
+    let mut out = BitWriter::default();
+    out.copy_bits(&rbsp, vui_flag_at);
+    out.bit(1); // vui_parameters_present_flag
+    for _ in 0..8 {
+        // aspect_ratio_info, overscan, video_signal_type, chroma_loc, timing,
+        // nal_hrd, vcl_hrd, pic_struct - all absent.
+        out.bit(0);
+    }
+    out.bit(1); // bitstream_restriction_flag
+    out.bit(1); // motion_vectors_over_pic_boundaries_flag
+    out.ue(0); // max_bytes_per_pic_denom - "no limit signalled"
+    out.ue(0); // max_bits_per_mb_denom
+    out.ue(16); // log2_max_mv_length_horizontal
+    out.ue(16); // log2_max_mv_length_vertical
+    out.ue(0); // max_num_reorder_frames - the entire point
+    // The buffer still has to hold the reference frames the stream uses; only
+    // the reordering delay is being removed.
+    out.ue(max_num_ref_frames);
+
+    Some(nal_from_rbsp(&out.finish()))
+}
+
+/// Rewrites every complete SPS in an Annex-B buffer to declare no reordering.
+/// Returns None when nothing changed, so the common frame keeps its buffer.
+pub(crate) fn with_low_delay_sps(annex_b: &[u8]) -> Option<Vec<u8>> {
+    let mut out: Option<Vec<u8>> = None;
+    let mut copied_to = 0;
+    let mut offset = 0;
+
+    while let Some((start, start_code_len)) = find_start_code(annex_b, offset) {
+        let nal_at = start + start_code_len;
+        offset = nal_at;
+        let Some(&header) = annex_b.get(nal_at) else {
+            break;
+        };
+        if header & 0x1f != NAL_TYPE_SPS {
+            continue;
+        }
+        // Only a NAL the next start code closes is known to be complete; a
+        // trailing one may still be mid-flight.
+        let Some((next, _)) = find_start_code(annex_b, nal_at) else {
+            break;
+        };
+        let Some(patched) = sps_with_low_delay_vui(&annex_b[nal_at..next]) else {
+            continue;
+        };
+
+        let buffer = out.get_or_insert_with(|| Vec::with_capacity(annex_b.len() + 16));
+        buffer.extend_from_slice(&annex_b[copied_to..nal_at]);
+        buffer.extend_from_slice(&patched);
+        copied_to = next;
+    }
+
+    if let Some(buffer) = out.as_mut() {
+        buffer.extend_from_slice(&annex_b[copied_to..]);
+    }
+    out
+}
+
 #[cfg(test)]
 /// Returns whether an access unit contains everything a new decoder needs:
 /// SPS, PPS, and an IDR picture. This is a safe bootstrap for a detector
@@ -482,7 +764,10 @@ pub(crate) fn is_decoder_seed(annex_b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_idr, is_decoder_seed, H264AccessUnitAssembler, H264Decoder};
+    use super::{
+        contains_idr, is_decoder_seed, sps_vui_flag_offset, with_low_delay_sps, BitReader,
+        H264AccessUnitAssembler, H264Decoder,
+    };
     use std::fs;
     use std::path::Path;
 
@@ -563,6 +848,101 @@ mod tests {
                 .expect("sample access unit must decode");
         }
         assert!(callbacks > 0, "sample must yield an RGBA frame");
+    }
+
+    /// A real SPS in the Tello's shape: the checked-in sample's own SPS with
+    /// its VUI removed, which is exactly what `fake-tello.ts --strip-vui`
+    /// produces and what the drone puts on the wire.
+    const TELLO_SHAPED_SPS: [u8; 9] = [
+        0x67, 0x42, 0xc0, 0x1f, 0xd9, 0x00, 0xf0, 0x16, 0xe4,
+    ];
+
+    /// Reads back the VUI this module writes and returns
+    /// (max_num_reorder_frames, max_dec_frame_buffering).
+    fn reorder_declaration(sps_nal: &[u8]) -> (u32, u32) {
+        let rbsp = super::rbsp_from_nal(sps_nal);
+        let (vui_at, _) = sps_vui_flag_offset(&rbsp).expect("patched SPS must still parse");
+        let mut bits = BitReader::new(&rbsp);
+        bits.u(vui_at as u32).unwrap();
+        assert_eq!(bits.u1().unwrap(), 1, "VUI must be present");
+        for _ in 0..8 {
+            assert_eq!(bits.u1().unwrap(), 0, "no optional VUI block is written");
+        }
+        assert_eq!(bits.u1().unwrap(), 1, "bitstream_restriction must be set");
+        bits.u1().unwrap(); // motion_vectors_over_pic_boundaries_flag
+        bits.ue().unwrap(); // max_bytes_per_pic_denom
+        bits.ue().unwrap(); // max_bits_per_mb_denom
+        bits.ue().unwrap(); // log2_max_mv_length_horizontal
+        bits.ue().unwrap(); // log2_max_mv_length_vertical
+        (bits.ue().unwrap(), bits.ue().unwrap())
+    }
+
+    #[test]
+    fn a_vui_less_sps_is_rewritten_to_declare_no_reordering() {
+        let mut annex_b = vec![0, 0, 0, 1];
+        annex_b.extend_from_slice(&TELLO_SHAPED_SPS);
+        annex_b.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xcb, 0x8c, 0xb2]);
+
+        let patched = with_low_delay_sps(&annex_b).expect("a VUI-less SPS must be rewritten");
+        let sps_end = patched
+            .windows(4)
+            .position(|window| window == [0, 0, 0, 1])
+            .and_then(|_| patched[4..].windows(4).position(|w| w == [0, 0, 0, 1]))
+            .expect("the PPS start code must survive")
+            + 4;
+        let (reorder, dpb) = reorder_declaration(&patched[4..sps_end]);
+        assert_eq!(reorder, 0, "the point of the rewrite");
+        assert_eq!(dpb, 3, "the DPB still holds the stream's reference frames");
+        assert_eq!(
+            &patched[sps_end..],
+            &[0, 0, 0, 1, 0x68, 0xcb, 0x8c, 0xb2],
+            "every other NAL is copied byte for byte"
+        );
+    }
+
+    #[test]
+    fn an_sps_that_declares_its_own_vui_is_left_alone() {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample.h264");
+        let bytes = fs::read(&sample).expect("checked-in sample.h264 must be readable");
+        let units = sample_access_units(&bytes);
+        // x264 writes max_num_reorder_frames itself, so there is nothing to say.
+        assert!(
+            with_low_delay_sps(units[0]).is_none(),
+            "a stream that already declares its reordering must pass through untouched"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_sps_still_decodes() {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample.h264");
+        let bytes = fs::read(&sample).expect("checked-in sample.h264 must be readable");
+        let units = sample_access_units(&bytes);
+
+        // Put the drone's SPS shape in front of a real IDR, rewrite it, and
+        // require FFmpeg to accept the result - a bit-level mistake here would
+        // be a stream no decoder can start.
+        let idr_at = annex_b_start_codes(units[0])
+            .into_iter()
+            .find(|&(start, prefix_len)| {
+                units[0].get(start + prefix_len).map(|header| header & 0x1f) == Some(5)
+            })
+            .map(|(start, _)| start)
+            .expect("the first access unit carries an IDR");
+        let mut rebuilt = vec![0, 0, 0, 1];
+        rebuilt.extend_from_slice(&TELLO_SHAPED_SPS);
+        rebuilt.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xcb, 0x8c, 0xb2]);
+        rebuilt.extend_from_slice(&units[0][idr_at..]);
+
+        let patched = with_low_delay_sps(&rebuilt).expect("the SPS must be rewritten");
+        let mut decoder = H264Decoder::new().expect("FFmpeg H.264 decoder must initialize");
+        let mut frames = 0usize;
+        decoder
+            .decode_into(&patched, true, |width, height, _| {
+                frames += 1;
+                assert_eq!((width, height), (960, 720));
+            })
+            .expect("a rewritten SPS must still configure the decoder");
+        assert_eq!(frames, 1, "the IDR must come straight out - no reorder wait");
     }
 
     #[test]

@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.2_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.3_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -251,8 +251,8 @@ subnet once a second and prints anything that answers.
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.2_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.2_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.3_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.3_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -305,7 +305,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.2_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.3_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:
@@ -1268,6 +1268,30 @@ class of defect *by construction*, which is the honest lesson: a control that
 differs from the source in the one field that matters agrees with the source
 about everything else. The table below stands, and the last row is now
 explained rather than open.
+
+**The decoder-side fix was half of it.** `prefer-software` only works where the
+hint is honoured. WebKitGTK's WebCodecs backend ignores it (Linux then paints
+at 209 ms against the reproduction below, and the real drone at ~500 ms), and
+no WebView setting reaches that decision, so the answer belongs in the stream:
+`video.rs` now runs every frame through `h264::with_low_delay_sps`, which gives
+an SPS that declares no VUI one that says `max_num_reorder_frames = 0` -
+the truth for a Tello, which sends no B-frames and one slice per picture. The
+DPB then holds only the stream's reference frames and every picture leaves the
+decoder as it lands. An SPS that already declares its own reordering is passed
+through byte for byte.
+
+**And the control can finally see it.** `fake-tello.ts --strip-vui` rewrites
+the sample's SPS into the drone's shape, so the defect reproduces with no drone
+and no battery:
+
+| Ubuntu 26.04 / WebKitGTK, same stream | recv -> paint p50 | dropped |
+|---|---|---|
+| simulator as encoded (VUI says reorder 0) | 10 ms | 0 |
+| `--strip-vui`, before the SPS rewrite | **209 ms** | 24 |
+| `--strip-vui`, after it | **11 ms** | **0** |
+
+Windows measures 6.7 ms on that same `--strip-vui` stream, so the rewrite costs
+the platform that was already healthy nothing.
 
 | source | recv -> paint p50 / p95 | `ipc` p50 / p95 | dropped |
 |---|---|---|---|
