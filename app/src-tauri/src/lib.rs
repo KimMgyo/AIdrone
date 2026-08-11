@@ -13,6 +13,7 @@ mod speech;
 mod state;
 mod tello;
 mod track;
+mod update;
 mod video;
 mod vision;
 
@@ -692,7 +693,9 @@ pub fn run() {
             copilot::copilot_turn,
             speech::dictate_ready,
             speech::dictate_start,
-            speech::dictate_stop
+            speech::dictate_stop,
+            update::update_check,
+            update::update_apply
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

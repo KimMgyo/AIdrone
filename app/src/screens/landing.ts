@@ -23,6 +23,9 @@ export type LandingModel = {
   probes: Probe[] | null;
   connecting: boolean;
   hint: string;
+  /** Set once GitHub has been asked; the row is silent until then, and stays
+   *  silent when this build is current. */
+  update: UpdateModel | null;
 };
 
 export interface Landing {
@@ -30,6 +33,14 @@ export interface Landing {
   log(line: string): void;
   clearLog(): void;
 }
+
+/** What the landing screen says about a newer build, and what it may do about
+ *  it. `applying` is one-way: the app is about to be replaced and restarted. */
+export type UpdateModel = {
+  version: string;
+  applying: boolean;
+  error: string | null;
+};
 
 const CARD = "bg-raised border border-line3 rounded-[4px]";
 const LABEL = "font-mono text-[11px] tracking-[.16em] text-dim";
@@ -40,7 +51,7 @@ const TAGS: Record<string, string> = { command: "CMD", state: "ST", video: "VID"
 
 export function installLanding(
   mount: HTMLElement,
-  deps: { onProbe: () => void; onConnect: () => void },
+  deps: { onProbe: () => void; onConnect: () => void; onUpdate: () => void },
 ): Landing {
   mount.innerHTML = `
     <div class="flex-1 min-h-0 overflow-hidden flex items-center justify-center px-[48px] py-[40px]"
@@ -116,6 +127,11 @@ export function installLanding(
               <button data-k="connect" type="button"
                 class="h-[40px] mt-[3px] bg-accent border-none rounded-[3px] text-[#08131A] text-[13.5px] font-semibold cursor-pointer hover:bg-accent2 disabled:opacity-50 disabled:cursor-default">연결하고 시작</button>
               <div data-k="hint" class="text-[11.5px] text-dim2 text-center"></div>
+              <div data-k="update" class="flex-none flex items-center justify-between gap-[10px] px-[12px] h-[38px] bg-accent/10 border border-accent/40 rounded-[3px]" style="display:none">
+                <div class="font-mono text-[11.5px] text-accent2" data-k="update-text">새 버전</div>
+                <button data-k="update-apply" type="button"
+                  class="h-[26px] px-[11px] bg-accent border-none rounded-[3px] text-[#08131A] text-[11.5px] font-semibold cursor-pointer hover:bg-accent2 disabled:opacity-50 disabled:cursor-default">업데이트</button>
+              </div>
             </div>
 
             <div data-k="boot" class="flex-1 basis-0 min-h-[88px] bg-sunken border border-[#1F242B] rounded-[4px] px-[14px] py-[13px] overflow-y-auto font-mono text-[11px] leading-[1.9] text-[#7C848F]"></div>
@@ -134,6 +150,9 @@ export function installLanding(
   const probes = q("probes", HTMLDivElement);
   const boot = q("boot", HTMLDivElement);
   const hint = q("hint", HTMLDivElement);
+  const updateRow = q("update", HTMLDivElement);
+  const updateText = q("update-text", HTMLDivElement);
+  const updateBtn = q("update-apply", HTMLButtonElement);
   const ends = {
     tello: q("e-tello", HTMLDivElement),
     state: q("e-state", HTMLDivElement),
@@ -145,6 +164,7 @@ export function installLanding(
 
   probeBtn.addEventListener("click", deps.onProbe);
   connectBtn.addEventListener("click", deps.onConnect);
+  updateBtn.addEventListener("click", deps.onUpdate);
 
   /** Rendered from scratch on each probe run - three rows, once every few
    *  seconds, so diffing them would cost more than it saves. */
@@ -209,6 +229,27 @@ export function installLanding(
       connectBtn.disabled = m.probing || m.connecting;
       text(connectBtn, m.connecting ? "연결 중…" : "연결하고 시작");
       text(hint, m.hint);
+
+      const available = m.update;
+      style(updateRow, "display", available === null ? "none" : "flex");
+      if (available !== null) {
+        text(
+          updateText,
+          available.error !== null
+            ? `업데이트 실패 · ${available.error}`
+            : available.applying
+              ? `${available.version} 내려받는 중 · 설치 후 재시작합니다`
+              : `새 버전 ${available.version}`,
+        );
+        updateText.className =
+          available.error !== null
+            ? "font-mono text-[11.5px] text-alert2"
+            : "font-mono text-[11.5px] text-accent2";
+        // A session replaces the whole binary, so it may only start from an
+        // idle screen - never while a probe or a connect is in flight.
+        updateBtn.disabled = available.applying || m.probing || m.connecting;
+        text(updateBtn, available.applying ? "설치 중…" : "업데이트");
+      }
     },
 
     log(line: string): void {

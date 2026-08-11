@@ -60,6 +60,9 @@ import {
   type Probe,
   type Telemetry,
   copilotTurn,
+  updateApply,
+  updateCheck,
+  type AvailableUpdate,
 } from "./transport.ts";
 import { hms, must } from "./ui.ts";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -107,6 +110,10 @@ let linkOk = false;
 let controlsReady = false;
 let status = "idle";
 let mode: ControlMode = "key";
+/** The newer build GitHub is offering, once asked; null while current. */
+let pendingUpdate: AvailableUpdate | null = null;
+let updateApplying = false;
+let updateError: string | null = null;
 
 const appWindow = getCurrentWindow();
 
@@ -115,6 +122,7 @@ const appWindow = getCurrentWindow();
 const landing = installLanding(landingRoot, {
   onProbe: () => void runProbe(),
   onConnect: () => void doConnect(),
+  onUpdate: () => void applyUpdate(),
 });
 
 const station = installStation(stationRoot, {
@@ -490,7 +498,35 @@ function paintLanding(): void {
       : link === null
         ? "엔드포인트를 읽는 중…"
         : "노드와 드론의 전원을 먼저 확인하세요",
+    update:
+      pendingUpdate === null
+        ? null
+        : { version: pendingUpdate.version, applying: updateApplying, error: updateError },
   });
+}
+
+/**
+ * Replaces this build with the newer one and restarts. Only reachable from the
+ * landing screen: the installer replaces the binary underneath a running
+ * process, so nothing may be in flight - least of all a drone.
+ */
+async function applyUpdate(): Promise<void> {
+  if (pendingUpdate === null || updateApplying || probing || busy) return;
+  updateApplying = true;
+  updateError = null;
+  paintLanding();
+  landing.log(`[update] ${pendingUpdate.asset} 내려받는 중 (${Math.round(pendingUpdate.size / 1e6)} MB)`);
+  try {
+    await updateApply(pendingUpdate);
+    // Rust exits the process on success, so reaching here means the handoff
+    // returned without replacing anything.
+    landing.log("[update] 설치 프로그램에 넘겼습니다 · 곧 재시작됩니다");
+  } catch (err) {
+    updateApplying = false;
+    updateError = errText(err);
+    landing.log(`[err] update: ${updateError}`);
+    paintLanding();
+  }
 }
 
 async function runProbe(): Promise<void> {
@@ -788,4 +824,18 @@ void (async () => {
     landing.log(`[err] endpoints: ${errText(err)}`);
   }
   paintLanding();
+})();
+
+// A launcher that cannot reach GitHub must still fly a drone, so this failure
+// is a log line and nothing more.
+void (async () => {
+  try {
+    pendingUpdate = await updateCheck();
+    if (pendingUpdate !== null) {
+      landing.log(`[update] 새 버전 ${pendingUpdate.version} · ${pendingUpdate.asset}`);
+      paintLanding();
+    }
+  } catch (err) {
+    landing.log(`[update] 확인 실패 · ${errText(err)}`);
+  }
 })();

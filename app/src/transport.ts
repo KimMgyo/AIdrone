@@ -712,6 +712,30 @@ export async function preflight(): Promise<Probe[]> {
   return await invoke<Probe[]>("preflight");
 }
 
+/** A newer build on this project's GitHub releases, for this exact platform.
+ *  Rust decides what "newer" and "this platform" mean and refuses anything it
+ *  cannot checksum, so the WebView only ever relays the answer back. */
+export type AvailableUpdate = {
+  version: string;
+  tag: string;
+  asset: string;
+  url: string;
+  digest: string;
+  size: number;
+};
+
+/** Null when this build is current. Rejects when GitHub could not be reached -
+ *  a launcher that cannot check for updates must still fly a drone. */
+export async function updateCheck(): Promise<AvailableUpdate | null> {
+  return await invoke<AvailableUpdate | null>("update_check");
+}
+
+/** Downloads, verifies and installs, then quits so the installer can replace
+ *  this binary and start the new one. Never returns on success. */
+export async function updateApply(update: AvailableUpdate): Promise<void> {
+  await invoke("update_apply", { update });
+}
+
 export function onFrame(cb: (data: Uint8Array, recvEpochUs: number) => void): () => void {
   return frameSubs.add(cb);
 }
