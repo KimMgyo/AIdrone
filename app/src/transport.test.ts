@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { decodeVisionEvent } from "./transport.ts";
+import { createChannelEpoch, decodeVisionEvent } from "./transport.ts";
 
 function marker(id: number, decisionMargin?: number): Record<string, unknown> {
   return {
@@ -71,5 +71,21 @@ describe("decodeVisionEvent ArUco comparisons", () => {
     const readyEngine = (readyWithDetail.engines as Record<string, unknown>[])[1]!;
     readyEngine.detail = "previous-frame failure";
     expect(decodeVisionEvent(readyWithDetail)).toBeNull();
+  });
+});
+
+
+describe("channel epochs", () => {
+  test("rejects every callback from a disconnected or superseded session", () => {
+    const epoch = createChannelEpoch();
+    const first = epoch.begin();
+    expect(epoch.accepts(first)).toBe(true);
+
+    const second = epoch.begin();
+    expect(epoch.accepts(first)).toBe(false);
+    expect(epoch.accepts(second)).toBe(true);
+
+    epoch.invalidate();
+    expect(epoch.accepts(second)).toBe(false);
   });
 });

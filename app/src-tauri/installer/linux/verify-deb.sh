@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks a built .deb declares every shared library it actually links.
+# Checks a built .deb declares its direct shared-library and dynamic WebKit H.264 dependencies.
 #
 # This exists because the FFmpeg packages cannot be named once and be right
 # everywhere: the binary links a specific SONAME, and Ubuntu renames the
@@ -20,6 +20,10 @@ if [ -z "$DEB" ] || [ ! -f "$DEB" ]; then
   echo "usage: $0 <path to .deb>" >&2
   exit 2
 fi
+
+# `avdec_h264` is loaded through GStreamer's registry rather than linked into
+# the executable. It accepts the Tello's byte-stream H.264 access units.
+WEBKIT_H264_RUNTIME_DEPENDENCIES=(gstreamer1.0-libav)
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -59,6 +63,18 @@ while read -r soname; do
   fi
 done < "$WORK/needed"
 
+# A GStreamer decoder plugin is dlopen'd after WebKitGTK starts, so it cannot
+# appear in `objdump -p`. A missing package otherwise yields a working command
+# link and a blank video canvas instead of an install-time failure.
+for dep in "${WEBKIT_H264_RUNTIME_DEPENDENCIES[@]}"; do
+  if grep -qxF "$dep" "$WORK/declared"; then
+    printf '  ok %-26s %s\n' "WebKit H.264 plugin" "$dep"
+  else
+    printf '  MISSING %-21s add "%s" to bundle.linux.deb.depends\n' "WebKit H.264 plugin" "$dep"
+    status=1
+  fi
+done
+
 # The reverse direction matters too: a name left over from another release
 # resolves to nothing and makes the package uninstallable rather than broken.
 while read -r dep; do
@@ -70,5 +86,5 @@ while read -r dep; do
   fi
 done < "$WORK/declared"
 
-[ "$status" -eq 0 ] && echo "deb dependencies match the binary" || echo "deb dependencies are wrong for this release" >&2
+[ "$status" -eq 0 ] && echo "deb dependencies cover linked libraries and WebKit H.264" || echo "deb dependencies are wrong for this release" >&2
 exit "$status"

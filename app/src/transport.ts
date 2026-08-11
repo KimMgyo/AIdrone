@@ -187,6 +187,29 @@ const rcErrorSubs = subscribers<[string]>();
  * invoking the native detector after a session has gone away. */
 let sessionLive = false;
 
+/**
+ * Tauri Channels can finish draining a queued batch after the Rust session that
+ * created them has stopped. Every callback captures this token, so an old
+ * session cannot paint or steer a new connection while its final messages
+ * drain.
+ */
+export function createChannelEpoch(): {
+  begin(): number;
+  invalidate(): void;
+  accepts(epoch: number): boolean;
+} {
+  let current = 0;
+  return {
+    begin: () => ++current,
+    invalidate: () => {
+      current++;
+    },
+    accepts: (epoch) => epoch === current,
+  };
+}
+
+const channelEpoch = createChannelEpoch();
+
 // ---------------------------------------------------------------------------
 // Frame wire format. Confirmed against tauri 2.11.5: a Channel carrying
 // `InvokeResponseBody::Raw` reaches JS as an ArrayBuffer, because any payload
@@ -532,33 +555,39 @@ export function decodeVisionEvent(msg: unknown): VisionEvent | null {
 export async function connect(): Promise<void> {
   prevCounters = null;
   sessionLive = false;
+  const epoch = channelEpoch.begin();
 
   const frames = new Channel<FrameWire>();
   frames.onmessage = (msg) => {
+    if (!channelEpoch.accepts(epoch)) return;
     const f = decodeFrame(msg);
     if (f) frameSubs.emit(f.data, f.recvEpochUs);
   };
 
   const telemetry = new Channel<unknown>();
   telemetry.onmessage = (msg) => {
+    if (!channelEpoch.accepts(epoch)) return;
     const t = decodeTelemetry(msg);
     if (t) telemetrySubs.emit(t);
   };
 
   const link = new Channel<unknown>();
   link.onmessage = (msg) => {
+    if (!channelEpoch.accepts(epoch)) return;
     const e = decodeLink(msg);
     if (e) linkSubs.emit(e);
   };
 
   const drone = new Channel<unknown>();
   drone.onmessage = (msg) => {
+    if (!channelEpoch.accepts(epoch)) return;
     const s = decodeDroneState(msg);
     if (s) droneSubs.emit(s);
   };
 
   const vision = new Channel<unknown>();
   vision.onmessage = (msg) => {
+    if (!channelEpoch.accepts(epoch)) return;
     const event = decodeVisionEvent(msg);
     if (event !== null) visionSubs.emit(event);
   };
@@ -569,6 +598,7 @@ export async function connect(): Promise<void> {
 
 export async function disconnect(): Promise<void> {
   prevCounters = null;
+  channelEpoch.invalidate();
   sessionLive = false;
   await invoke("disconnect");
 }

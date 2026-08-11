@@ -127,9 +127,6 @@ jobs:
         working-directory: app
         run: bash src-tauri/installer/linux/build-deb.sh
 
-      - name: Build AppImage
-        working-directory: app
-        run: bun run tauri build --bundles appimage
 
       - name: Stage version-labelled Ubuntu packages
         working-directory: app
@@ -139,10 +136,6 @@ jobs:
           for artifact in src-tauri/target/release/bundle/deb/*.deb; do
             name=$(basename "$artifact" .deb)
             cp "$artifact" "release-assets/${name}_${{ matrix.release }}.deb"
-          done
-          for artifact in src-tauri/target/release/bundle/appimage/*.AppImage; do
-            name=$(basename "$artifact" .AppImage)
-            cp "$artifact" "release-assets/${name}_${{ matrix.release }}.AppImage"
           done
 
       - name: Collect Ubuntu packages

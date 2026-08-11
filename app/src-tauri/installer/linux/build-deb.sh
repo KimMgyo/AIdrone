@@ -8,6 +8,10 @@
 # whoever builds it to remember, the list is derived from the binary that was
 # just built and handed to the bundler through `--config`.
 #
+# GStreamer codec plugins are loaded dynamically, so they never appear in the
+# executable's `DT_NEEDED` list. WebKitGTK needs the fixed runtime dependency
+# declared below to decode the Tello's H.264 stream.
+#
 # Two passes, because the dependency list is a function of the binary and the
 # binary does not exist until the first one. The second pass is cheap: Cargo is
 # already warm, so only the bundling step runs again.
@@ -20,6 +24,11 @@ cd "$APP_DIR"
 # Only the libraries this project pulls in beyond the base system; glibc and
 # friends are guaranteed present and naming them would be noise.
 INTERESTING='^lib(av|sw|asound|webkit|gtk|soup|javascriptcore)'
+
+# `avdec_h264` is supplied by the dynamically-loaded GStreamer libav plugin.
+# Do not make this a Recommends: without it, the app can connect but WebKitGTK
+# has no H.264 decoder to paint the Tello stream.
+WEBKIT_H264_RUNTIME_DEPENDENCIES=(gstreamer1.0-libav)
 
 echo "==> pass 1: build the binary"
 bun run tauri build --bundles deb
@@ -40,6 +49,12 @@ while read -r soname; do
   printf '  %-30s %s\n' "$soname" "$owner"
   depends+=("$owner")
 done < <(objdump -p "$BIN" | awk '/NEEDED/ {print $2}' | grep -E "$INTERESTING" | sort -u)
+
+# DT_NEEDED cannot reveal GStreamer plugins, which WebKitGTK looks up after it
+# starts. Include the H.264 decoder explicitly and avoid duplicate control-file
+# entries when a future binary also adds the same package.
+depends+=("${WEBKIT_H264_RUNTIME_DEPENDENCIES[@]}")
+mapfile -t depends < <(printf '%s\n' "${depends[@]}" | sort -u)
 
 # JSON array without needing jq, which is not a build dependency anywhere else.
 list=$(printf '"%s",' "${depends[@]}"); list="[${list%,}]"

@@ -22,7 +22,8 @@ bun run tauri build --bundles nsis
 bash src-tauri/installer/linux/build-deb.sh
 ```
 
-The `.deb` is the normal Ubuntu installation path because its maintainer
-scripts configure the USB-NCM host link. An AppImage is manual-networking only.
-See the repository [README](../README.md#host-nic-setup---done-by-the-installer)
+The `.deb` is the only supported Ubuntu distribution because its maintainer
+scripts configure the USB-NCM host link and its package dependencies install
+WebKitGTK's H.264 decoder. See the repository
+README's [host NIC setup](../README.md#host-nic-setup---done-by-the-installer)
 for installation behavior, supported Ubuntu releases, and verification steps.

@@ -17,7 +17,8 @@
           "libavutil58",
           "libswscale7",
           "libjavascriptcoregtk-4.1-0",
-          "libsoup-3.0-0"
+          "libsoup-3.0-0",
+          "gstreamer1.0-libav"
         ],
         "recommends": [
           "network-manager"

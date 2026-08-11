@@ -163,21 +163,31 @@ a `Recommends`, not a `Depends`), `postinst` prints the manual `ip addr add`
 command instead. Package defaults update only while these two `/etc` files are
 unmodified; local subnet/rule edits survive upgrades and purge.
 
+The video canvas uses WebKitGTK's WebCodecs implementation. Its H.264 decoder
+is a GStreamer plugin discovered at runtime rather than an ELF dependency, so
+the `.deb` explicitly **Depends** on `gstreamer1.0-libav`. The original
+release omitted that plugin: on an affected installation, install it, fully
+quit AIdrone, then reopen and reconnect:
+
+```bash
+sudo apt update
+sudo apt install -y gstreamer1.0-libav
+```
+
+`gstreamer1.0-libav` supplies `avdec_h264`, the software decoder selected by
+the application's low-latency WebCodecs configuration. It is available on
+Ubuntu 22.04, 24.04, and 26.04.
+
 Neither assigns a default gateway. One here would route the machine's internet
 traffic down a USB cable to a drone.
 
-### AppImage is portable media, not a configured host install
+### Linux release format
 
-An AppImage cannot run the `.deb` maintainer scripts, so it does **not** install
-the udev rename or NetworkManager profile. Use the `.deb` for a normal
-plug-and-play Ubuntu install. An AppImage user must complete the Linux commands
-below manually after every applicable host setup.
-
-The AppImage built on Ubuntu 24.04 was observed running on Ubuntu 26.04 using
-its bundled FFmpeg libraries, but it fails on Ubuntu 22.04 because bundled
-libraries require `GLIBC_2.38`. Do not present that artifact as a 22.04
-release; build and test it on the oldest intended distribution if portability
-is required.
+Only release-targeted `.deb` artifacts are published for Ubuntu. An AppImage
+cannot run the `.deb` maintainer scripts or declare WebKitGTK's dynamically
+loaded `gstreamer1.0-libav` H.264 decoder, so it is not a supported portable
+distribution for this application. Use the `.deb` for a normal plug-and-play
+Ubuntu install.
 
 ### Doing it by hand
 
@@ -249,14 +259,17 @@ would die at exec time. Build on the release you ship to.
 
 `installer/linux/build-deb.sh` is the **only release command for a `.deb`**:
 it builds once, reads the resulting binary's `DT_NEEDED` entries, resolves each
-to its owning package on the build host, removes that throwaway pass, then
-bundles and verifies the one release artifact. The static `depends` in
-`tauri.linux.conf.json` is only a 24.04 fallback for exploratory plain
-`tauri build`; do not ship it as a cross-release package.
+to its owning package on the build host, explicitly adds
+`gstreamer1.0-libav` for WebKitGTK's dynamically discovered H.264 decoder,
+removes that throwaway pass, then bundles and verifies the one release
+artifact. The static `depends` in `tauri.linux.conf.json` is only a 24.04
+fallback for exploratory plain `tauri build`; do not ship it as a cross-release
+package.
 
 `installer/linux/verify-deb.sh` is the check underneath it, and can be run on
 its own. It reports both directions - a library that is linked but undeclared,
-and a declared name that no package on this release provides:
+a declared name that no package on this release provides, and the required
+GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
@@ -286,10 +299,10 @@ then silently does nothing forever.
 ### GitHub continuous builds
 
 Every push to `main` runs `.github/workflows/release.yml`. GitHub builds the
-Windows NSIS installer plus a release-targeted `.deb` and AppImage pair on each
-supported Ubuntu runner: 22.04, 24.04, and 26.04. Ubuntu assets carry an
-`_ubuntu22`, `_ubuntu24`, or `_ubuntu26` suffix so their libc baseline is
-explicit and no matrix artifact can overwrite another. The 26.04 runner is
+Windows NSIS installer plus a release-targeted `.deb` on each supported Ubuntu
+runner: 22.04, 24.04, and 26.04. Ubuntu assets carry an `_ubuntu22`,
+`_ubuntu24`, or `_ubuntu26` suffix so their libc baseline is explicit and no
+matrix artifact can overwrite another. The 26.04 runner is
 GitHub's public-preview image. All assets are published as a unique prerelease
 tagged `build-<full commit SHA>`; the tag is unique per commit, so rerunning a
 workflow updates that commit's assets rather than overwriting another build.
@@ -305,7 +318,7 @@ library before it opens a YOLO session.
 | Artifact | Runtime path | Notices |
 |---|---|---|
 | Windows NSIS install | `$INSTDIR\onnxruntime\windows-x64\onnxruntime.dll` | `$INSTDIR\onnxruntime\LICENSE`, `$INSTDIR\onnxruntime\ThirdPartyNotices.txt` |
-| Ubuntu `.deb` / AppImage | `/usr/lib/AIdrone/onnxruntime/linux-x64/libonnxruntime.so.1.28.0` | `/usr/lib/AIdrone/onnxruntime/LICENSE`, `/usr/lib/AIdrone/onnxruntime/ThirdPartyNotices.txt` |
+| Ubuntu `.deb` | `/usr/lib/AIdrone/onnxruntime/linux-x64/libonnxruntime.so.1.28.0` | `/usr/lib/AIdrone/onnxruntime/LICENSE`, `/usr/lib/AIdrone/onnxruntime/ThirdPartyNotices.txt` |
 
 `onnxruntime_providers_shared` is installed beside the runtime on both
 platforms. Keep that sibling and the notices when repackaging; replacing the
@@ -1251,13 +1264,15 @@ explained rather than open.
    window read "connected" over a black canvas. A terminated process runs no
    destructors, so this is the normal consequence of any hard stop.
 
-   Frames arriving is now the only accepted proof: `ensure_stream_flowing`
-   watches the receiver's frame counter and requires it to still be climbing
-   1.5 s after the first frame - past the far edge of that 21-frame burst -
-   then re-runs `streamoff`/`streamon` with 1.5 s and 3 s settle times before
-   giving up with an error that names the remedy. Connect costs **3.26 s**
-   (measured, 3 of 3) against 1.4 s before. That is the price of never showing
-   a black window that claims to be connected.
+   Native frame batches are still the first accepted proof:
+   `ensure_stream_flowing` watches the receiver's frame counter and requires it
+   to still be climbing 1.5 s after the first frame - past the far edge of that
+   21-frame burst - then re-runs `streamoff`/`streamon` with 1.5 s and 3 s
+   settle times before giving up with an error that names the remedy. The
+   frontend now requires a real canvas paint after that native proof and before
+   it enables manual or console controls; a missing WebKit/GStreamer decoder
+   tears the just-created session down and leaves the operator on the landing
+   screen with the decoder error rather than a black “connected” station.
 
 5. **Closing the window stranded the drone - every time.** Defect 4 blamed
    "any hard stop", which was too generous: Tauri does not drop managed state

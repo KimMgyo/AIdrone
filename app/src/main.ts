@@ -73,6 +73,12 @@ const SHELL_HZ_MS = 250;
  *  reading, because a frozen number looks exactly like a steady one. */
 const STATE_STALE_MS = 2_000;
 
+/** Native `connect()` proves UDP frame batches arrived, not that WebKit decoded
+ * one. Do not expose flight controls until the current renderer has painted a
+ * real frame; two IDR periods leave room for a transient decoder recovery. */
+const FIRST_PAINT_TIMEOUT_MS = 5_000;
+const FIRST_PAINT_POLL_MS = 50;
+
 /** Why the loop stopped, in the operator's words, for the action timeline. */
 const STOP_REASON: Record<FollowReason, string> = {
   locked: "잠금",
@@ -96,7 +102,9 @@ let lastTelemetry: Telemetry | null = null;
 let rxPktsPerSec: number | null = null;
 let prevPkts: number | null = null;
 let droneState: DroneState | null = null;
-let linkOk = true;
+let linkOk = false;
+/** True only after the active session has painted a decoded frame. */
+let controlsReady = false;
 let status = "idle";
 let mode: ControlMode = "key";
 
@@ -174,6 +182,13 @@ follow.subscribe((state, reason) => {
  * engaged and centred, and resumes on its own.
  */
 function pushFollowTarget(): void {
+  // A native link can have UDP ingress while its decoder has not produced a
+  // frame. Never let an early mode change turn a queued observation into RC.
+  if (!controlsReady) {
+    follow.update(false, null, mode === "person" ? PERSON_DESIRED_SIZE : ARUCO_DESIRED_SIZE);
+    return;
+  }
+
   if (mode === "aruco") {
     const state = vision.arucoSnapshot();
     const marker = state.target.state === "detected" ? state.target.marker : null;
@@ -217,7 +232,7 @@ const modeSelector = installModeSelector(station.mounts.mode, {
 });
 const copilot = installCopilot(station.mounts.copilot, {
   run: (instruction, hooks) => startCopilotTask(instruction, hooks),
-  ready: () => linkOk,
+  ready: () => controlsReady && linkOk,
 });
 
 setMode(mode);
@@ -262,12 +277,11 @@ function setMode(nextMode: ControlMode): void {
   station.setMode(mode);
   modeSelector.setMode(mode);
   if (mode !== "key") keymap.neutral();
-  keymap.setEnabled(renderer !== null && mode === "key");
-  // The setpoint belongs to the mode, not to the last detection: without this
-  // the card keeps showing the previous mode's target until somebody walks
-  // into frame, because a detector with nothing to report sends nothing.
-  pushFollowTarget();
-  if (renderer !== null) {
+  keymap.setEnabled(controlsReady && mode === "key");
+  // The detector may report during the native handshake. Its observations are
+  // useful to paint, but cannot select an RC loop before a frame proves the
+  // operator can see what it would follow.
+  if (controlsReady) {
     status = statusForMode(mode);
     queueVisionMode(mode);
   }
@@ -283,11 +297,11 @@ function queueVisionMode(nextMode: ControlMode): void {
   const revision = ++visionModeRevision;
   visionModeRequest = visionModeRequest
     .then(() => {
-      if (revision !== visionModeRevision || renderer === null || mode !== nextMode) return;
+      if (revision !== visionModeRevision || !controlsReady || renderer === null || mode !== nextMode) return;
       return setVisionMode(nextMode);
     })
     .catch((err: unknown) => {
-      if (revision !== visionModeRevision || renderer === null || mode !== nextMode) return;
+      if (revision !== visionModeRevision || !controlsReady || renderer === null || mode !== nextMode) return;
       consolePanel.push("err", `!  native vision mode: ${errText(err)}`);
     });
 }
@@ -446,7 +460,10 @@ onRcError((message) => {
 });
 
 onLink((e) => {
-  linkOk = e.kind === "recovered";
+  // A recovered native link only says UDP frames arrived. It does not say
+  // WebKit decoded them, so it cannot reopen the controls during the paint
+  // gate.
+  linkOk = controlsReady && e.kind === "recovered";
   if (e.kind === "silent") {
     timeline.push("LINK", `영상이 ${e.seconds}초째 도착하지 않습니다`);
     consolePanel.push("err", `!  video silent ${e.seconds}s`);
@@ -494,12 +511,39 @@ async function runProbe(): Promise<void> {
   }
 }
 
+/** Waits for the last connection boundary: a real decoded frame on this
+ * canvas. The native handshake has already proved UDP ingress by this point,
+ * but a missing WebKit/GStreamer decoder would otherwise look connected and
+ * leave an operator with controls over a black display. */
+async function waitForFirstPaint(candidate: VideoRenderer): Promise<void> {
+  const deadline = performance.now() + FIRST_PAINT_TIMEOUT_MS;
+  for (;;) {
+    const stats = candidate.stats();
+    if (stats.painted > 0) return;
+
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      const cause = stats.lastError === null ? "no decoder output" : `decoder: ${stats.lastError}`;
+      throw new Error(`video did not paint within ${FIRST_PAINT_TIMEOUT_MS} ms (${cause})`);
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, Math.min(FIRST_PAINT_POLL_MS, remaining)));
+  }
+}
+
 async function doConnect(): Promise<void> {
   if (busy || renderer !== null) return;
   busy = true;
+  // A task created by the previous session must not reach the newly live
+  // native worker while this connection is still waiting on a decoded frame.
+  controlsReady = false;
+  linkOk = false;
+  visionModeRevision++;
+  copilot.abort();
+  keymap.setEnabled(false);
+  consolePanel.setEnabled(false);
   paintLanding();
 
-  linkOk = false;
+  let nativeSessionStarted = false;
   const t0 = performance.now();
   landing.log(`[link] connect() · ${link?.tello ?? "?"}`);
   try {
@@ -511,24 +555,44 @@ async function doConnect(): Promise<void> {
     // adapter is armed before IPC starts and cleared again on any failure.
     vision.setSessionLive(true);
     await connect();
+    nativeSessionStarted = true;
+    landing.log("[link] native video flow confirmed · waiting for canvas paint");
+    await waitForFirstPaint(renderer);
+
     const ms = Math.round(performance.now() - t0);
-    landing.log(`[link] 세션 수립 · 영상 흐름 확인됨 (${ms} ms)`);
-    status = statusForMode(mode);
+    landing.log(`[link] session up · video painted (${ms} ms)`);
+    controlsReady = true;
     linkOk = true;
+    status = statusForMode(mode);
     queueVisionMode(mode);
     timeline.push("LINK", `세션 시작 · ${link?.tello ?? ""} · Tello SDK 2.0`);
-    consolePanel.push("info", `session up in ${ms} ms`);
+    consolePanel.push("info", `session up with painted video in ${ms} ms`);
     keymap.setEnabled(mode === "key");
     consolePanel.setEnabled(true);
     showStation(true);
   } catch (err) {
+    // This runs while the native session is still present, so stopping a live
+    // follow loop can deliver its neutral RC before disconnect tears sockets
+    // down. Every producer stays closed even if a stale copilot turn wakes.
+    controlsReady = false;
+    linkOk = false;
+    visionModeRevision++;
+    copilot.abort();
     follow.stop("session");
+    keymap.setEnabled(false);
+    consolePanel.setEnabled(false);
+    if (nativeSessionStarted) {
+      try {
+        await disconnect();
+      } catch (cleanupErr) {
+        landing.log(`[err] video-start cleanup: ${errText(cleanupErr)}`);
+      }
+    }
     renderer?.close();
     renderer = null;
     vision.setSessionLive(false);
     landing.log(`[err] ${errText(err)}`);
     status = "idle";
-  } finally {
     busy = false;
     paintLanding();
   }
@@ -537,6 +601,10 @@ async function doConnect(): Promise<void> {
 async function doDisconnect(): Promise<void> {
   if (busy || renderer === null) return;
   busy = true;
+  controlsReady = false;
+  linkOk = false;
+  visionModeRevision++;
+  copilot.abort();
   // Autonomy, then sticks: the drone keeps flying on the last rc it heard, and
   // the session teardown below is the point at which nothing is left to send
   // one.
@@ -549,8 +617,6 @@ async function doDisconnect(): Promise<void> {
   // has never seen.
   copilotMemory.length = 0;
   consolePanel.setEnabled(false);
-  visionModeRevision++;
-  vision.setSessionLive(false);
   try {
     await disconnect();
     timeline.push("LINK", "세션 종료");
