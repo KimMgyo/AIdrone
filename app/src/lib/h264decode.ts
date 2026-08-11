@@ -218,6 +218,17 @@ export class H264Stream {
    * increasing for a live low-latency pipeline like this one, not
    * wall-clock-accurate (nothing here does A/V sync or seeking). */
   private static readonly FRAME_INTERVAL_US = 33_333;
+  /** `decode()` call time per outstanding chunk, in decode order. The stream
+   *  no longer reorders (the SPS is rewritten to say so), so the head always
+   *  belongs to the next frame out - and the difference is the decoder's own
+   *  latency, the one number that separates "our code is slow" from "this
+   *  WebView hands frames back on the compositor's clock". Bounded: a decoder
+   *  that swallows a chunk must not grow this forever. */
+  private readonly decodeStartedAt: number[] = [];
+  private static readonly DECODE_TRACK_MAX = 8;
+  /** Last measured decode() -> output() latency in ms, or null before the
+   *  first frame. */
+  private lastDecodeMs: number | null = null;
 
   constructor(cb: H264StreamCallbacks) {
     this.cb = cb;
@@ -226,6 +237,11 @@ export class H264Stream {
   /** The configuration in force, for diagnostics only. */
   configuration(): VideoDecoderConfig | null {
     return this.lastConfig;
+  }
+
+  /** The decoder's own latency for the most recent frame, in ms. */
+  decodeLatencyMs(): number | null {
+    return this.lastDecodeMs;
   }
 
   /** Feeds one newly arrived chunk of raw bytes (e.g. one WS binary frame's
@@ -292,6 +308,9 @@ export class H264Stream {
     if (this.chunkTimestampUs !== undefined) this.chunkTimestampUs = timestamp + 1;
     this.nextTimestampUs = timestamp + H264Stream.FRAME_INTERVAL_US;
     try {
+      if (this.decodeStartedAt.length < H264Stream.DECODE_TRACK_MAX) {
+        this.decodeStartedAt.push(performance.now());
+      }
       this.decoder.decode(
         new EncodedVideoChunk({ type: isKeyframe ? "key" : "delta", timestamp, data }),
       );
@@ -305,7 +324,11 @@ export class H264Stream {
   private configureDecoder(sps: Uint8Array): void {
     try {
       const decoder = new VideoDecoder({
-        output: (frame) => this.cb.onFrame(frame),
+        output: (frame) => {
+          const startedAt = this.decodeStartedAt.shift();
+          if (startedAt !== undefined) this.lastDecodeMs = performance.now() - startedAt;
+          this.cb.onFrame(frame);
+        },
         error: (e) => this.reportError(e),
       });
       const config: VideoDecoderConfig = {
@@ -352,6 +375,7 @@ export class H264Stream {
     this.prefixNals = [];
     this.sps = null;
     this.nextTimestampUs = 0;
+    this.decodeStartedAt.length = 0;
     if (decoder && decoder.state !== "closed") {
       try {
         decoder.close();
@@ -371,6 +395,8 @@ export class H264Stream {
     const decoder = this.decoder;
     this.decoder = null;
     this.prefixNals = [];
+    // Anything still outstanding will never come back out of this decoder.
+    this.decodeStartedAt.length = 0;
     if (decoder !== null && decoder.state !== "closed") {
       try {
         decoder.close();

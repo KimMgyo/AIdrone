@@ -25,6 +25,9 @@ export interface RenderStats {
    * latencyP*Ms to get decode + vsync wait. Split because the two halves need
    * opposite fixes and a single total cannot say which one is at fault. */
   transportP50Ms: number | null;
+  /** `decode()` -> `output()` for the most recent frame: the decoder's own
+   *  latency, with our transport and our paint excluded. */
+  decodeMs: number | null;
   transportP95Ms: number | null;
   width: number;
   height: number;
@@ -121,6 +124,7 @@ export class VideoRenderer {
       transportP50Ms: transport.length > 0 ? percentile(transport, 50) : null,
       transportP95Ms: transport.length > 0 ? percentile(transport, 95) : null,
       width: this.canvas.width,
+      decodeMs: this.stream.decodeLatencyMs(),
       height: this.canvas.height,
       decodeErrors: this.decodeErrors,
       lastError: this.lastError,

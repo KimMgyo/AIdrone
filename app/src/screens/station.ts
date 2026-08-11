@@ -34,6 +34,8 @@ export type StationModel = {
    *  a large remainder is decode plus however long the compositor made the
    *  paint wait. */
   ipcMs: number | null;
+  /** Decoder-only latency, so the remainder of `rttMs` is ours. */
+  decodeMs: number | null;
   bat: number | null;
   /** Motor-on seconds, straight off the drone's state datagram. */
   flightS: number | null;
@@ -201,6 +203,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       <div><span data-k="mbps">--</span> Mb/s</div>
       <div>GAP <span data-k="gap">--</span> ms</div>
       <div>IPC <span data-k="ipc">--</span> ms</div>
+      <div>DEC <span data-k="dec">--</span> ms</div>
       <div>DROP <span data-k="drop">--</span></div>
       <div data-k="link" class="text-dim2">LINK IDLE</div>
     </div>
@@ -241,6 +244,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     mbps: q("mbps", HTMLSpanElement),
     gap: q("gap", HTMLSpanElement),
     ipc: q("ipc", HTMLSpanElement),
+    dec: q("dec", HTMLSpanElement),
     drop: q("drop", HTMLSpanElement),
     link: q("link", HTMLDivElement),
     glLeft: q("gl-left", HTMLDivElement),
@@ -379,6 +383,8 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       text(cell.ipc, ipc === null ? MISSING : ipc.toFixed(1));
       text(cell.drop, dropped === null ? MISSING : String(dropped));
 
+      const dec = finite(m.decodeMs);
+      text(cell.dec, dec === null ? MISSING : dec.toFixed(1));
       text(cell.link, !m.live ? "LINK IDLE" : m.linkOk ? "LINK STABLE" : "LINK SILENT");
       cell.link.className = !m.live ? "text-dim2" : m.linkOk ? "text-ok" : "text-alert";
     },
