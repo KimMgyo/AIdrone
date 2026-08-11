@@ -1,0 +1,6 @@
+# GitHub documents ubuntu-26.04 as a hosted public-preview runner; actionlint's
+# hosted-runner list has not caught up yet. Keep this exception limited to it.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'label "ubuntu-26\.04" is unknown'

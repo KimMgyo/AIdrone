@@ -80,8 +80,21 @@ jobs:
           if-no-files-found: error
 
   ubuntu:
-    name: Ubuntu 22.04 packages
-    runs-on: ubuntu-22.04
+    name: Ubuntu ${{ matrix.version }} packages
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            version: "22.04"
+            release: ubuntu22
+          - runner: ubuntu-24.04
+            version: "24.04"
+            release: ubuntu24
+          - runner: ubuntu-26.04
+            version: "26.04"
+            release: ubuntu26
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -110,13 +123,25 @@ jobs:
         working-directory: app
         run: bun run tauri build --bundles appimage
 
+      - name: Stage version-labelled Ubuntu packages
+        working-directory: app
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          for artifact in src-tauri/target/release/bundle/deb/*.deb; do
+            name=$(basename "$artifact" .deb)
+            cp "$artifact" "release-assets/${name}_${{ matrix.release }}.deb"
+          done
+          for artifact in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            name=$(basename "$artifact" .AppImage)
+            cp "$artifact" "release-assets/${name}_${{ matrix.release }}.AppImage"
+          done
+
       - name: Collect Ubuntu packages
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-22-packages
-          path: |
-            app/src-tauri/target/release/bundle/deb/*.deb
-            app/src-tauri/target/release/bundle/appimage/*.AppImage
+          name: ubuntu-${{ matrix.release }}-packages
+          path: app/release-assets/*
           if-no-files-found: error
 
   publish:

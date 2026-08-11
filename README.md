@@ -286,11 +286,14 @@ then silently does nothing forever.
 ### GitHub continuous builds
 
 Every push to `main` runs `.github/workflows/release.yml`. GitHub builds the
-Windows NSIS installer and the Ubuntu 22.04 `.deb` plus AppImage, then publishes
-them as a unique prerelease tagged `build-<full commit SHA>`. The tag is unique
-per commit, so rerunning a workflow updates that commit's assets rather than
-overwriting another build. These are continuous builds, not manually promoted
-stable releases.
+Windows NSIS installer plus a release-targeted `.deb` and AppImage pair on each
+supported Ubuntu runner: 22.04, 24.04, and 26.04. Ubuntu assets carry an
+`_ubuntu22`, `_ubuntu24`, or `_ubuntu26` suffix so their libc baseline is
+explicit and no matrix artifact can overwrite another. The 26.04 runner is
+GitHub's public-preview image. All assets are published as a unique prerelease
+tagged `build-<full commit SHA>`; the tag is unique per commit, so rerunning a
+workflow updates that commit's assets rather than overwriting another build.
+These are continuous builds, not manually promoted stable releases.
 
 ### Bundled ONNX Runtime
 
