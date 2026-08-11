@@ -119,7 +119,10 @@ fn client() -> Result<&'static reqwest::Client, String> {
 
 /// Split from the env lookup so precedence is testable without mutating
 /// process-wide state.
-fn resolve_key_from(env_value: Option<String>, locations: &[KeyLocation]) -> Result<String, String> {
+fn resolve_key_from(
+    env_value: Option<String>,
+    locations: &[KeyLocation],
+) -> Result<String, String> {
     if let Some(raw) = env_value {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
@@ -196,7 +199,10 @@ fn models_from(single: Option<String>, list: Option<String>) -> Vec<String> {
 }
 
 fn model_chain() -> Vec<String> {
-    models_from(std::env::var("COPILOT_MODEL").ok(), std::env::var("COPILOT_MODELS").ok())
+    models_from(
+        std::env::var("COPILOT_MODEL").ok(),
+        std::env::var("COPILOT_MODELS").ok(),
+    )
 }
 
 /// The router is OpenAI-shaped, so pointing this at any other OpenAI-compatible
@@ -249,7 +255,10 @@ fn operator_error(status: u16, body: &str) -> String {
     match status {
         429 => "모델 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.".to_owned(),
         401 | 403 => "API 키가 거부됐습니다. 키를 확인하세요.".to_owned(),
-        502 | 503 | 504 => "모델 공급자가 응답하지 않습니다. 다른 모델을 고르거나 잠시 후 다시 시도하세요.".to_owned(),
+        502 | 503 | 504 => {
+            "모델 공급자가 응답하지 않습니다. 다른 모델을 고르거나 잠시 후 다시 시도하세요."
+                .to_owned()
+        }
         // Anything else is rare enough that the server's own words are more
         // use than a category we invented.
         _ => {
@@ -293,7 +302,10 @@ fn assemble_stream(sse: &str) -> serde_json::Value {
         if let Some(text) = delta.get("content").and_then(serde_json::Value::as_str) {
             content.push_str(text);
         }
-        let Some(fragments) = delta.get("tool_calls").and_then(serde_json::Value::as_array) else {
+        let Some(fragments) = delta
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+        else {
             continue;
         };
         for fragment in fragments {
@@ -314,7 +326,10 @@ fn assemble_stream(sse: &str) -> serde_json::Value {
             if let Some(name) = function.get("name").and_then(serde_json::Value::as_str) {
                 slot.1.push_str(name);
             }
-            if let Some(args) = function.get("arguments").and_then(serde_json::Value::as_str) {
+            if let Some(args) = function
+                .get("arguments")
+                .and_then(serde_json::Value::as_str)
+            {
                 slot.2.push_str(args);
             }
         }
@@ -655,7 +670,10 @@ mod tests {
         // Every default must be a real router id, not a typo that silently
         // costs one link of the chain.
         for model in DEFAULT_MODELS {
-            assert!(model.contains('/'), "{model} is not a provider-qualified id");
+            assert!(
+                model.contains('/'),
+                "{model} is not a provider-qualified id"
+            );
         }
     }
 
@@ -663,7 +681,10 @@ mod tests {
     fn naming_one_model_disables_the_chain() {
         // An operator who names a model means that model: falling back past it
         // would fly the drone on something they did not choose.
-        assert_eq!(models_from(Some(" oc/big-pickle \n".to_owned()), None), vec!["oc/big-pickle"]);
+        assert_eq!(
+            models_from(Some(" oc/big-pickle \n".to_owned()), None),
+            vec!["oc/big-pickle"]
+        );
         // COPILOT_MODEL wins over COPILOT_MODELS, being the more specific one.
         assert_eq!(
             models_from(Some("oc/big-pickle".to_owned()), Some("a/b,c/d".to_owned())),
@@ -673,10 +694,16 @@ mod tests {
 
     #[test]
     fn a_custom_chain_is_split_and_cleaned() {
-        assert_eq!(models_from(None, Some("a/b, c/d ,e/f".to_owned())), vec!["a/b", "c/d", "e/f"]);
+        assert_eq!(
+            models_from(None, Some("a/b, c/d ,e/f".to_owned())),
+            vec!["a/b", "c/d", "e/f"]
+        );
         // Trailing commas and blanks are punctuation, not a request for a
         // model called "".
-        assert_eq!(models_from(None, Some("a/b,,  ,c/d,".to_owned())), vec!["a/b", "c/d"]);
+        assert_eq!(
+            models_from(None, Some("a/b,,  ,c/d,".to_owned())),
+            vec!["a/b", "c/d"]
+        );
         // An entirely empty list is not a chain of nothing; it is no opinion.
         assert_eq!(models_from(None, Some(" , ".to_owned())), DEFAULT_MODELS);
     }
@@ -690,7 +717,8 @@ mod tests {
         );
         assert!(has_calls(&with));
 
-        let prose = assemble_stream("data: {\"choices\":[{\"delta\":{\"content\":\"못 합니다\"}}]}\n");
+        let prose =
+            assemble_stream("data: {\"choices\":[{\"delta\":{\"content\":\"못 합니다\"}}]}\n");
         assert!(!has_calls(&prose));
         assert!(!has_calls(&serde_json::json!({})));
     }
@@ -713,19 +741,31 @@ mod tests {
             {"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[]},
             {"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"53.681565701s"}]}}"#;
         let wait = retry_after(body).expect("retry delay");
-        assert!((wait.as_secs_f64() - 53.681_565_701).abs() < 1e-6, "{wait:?}");
-        assert!(wait < MAX_RETRY_WAIT, "a free-tier wait must be worth sitting out");
+        assert!(
+            (wait.as_secs_f64() - 53.681_565_701).abs() < 1e-6,
+            "{wait:?}"
+        );
+        assert!(
+            wait < MAX_RETRY_WAIT,
+            "a free-tier wait must be worth sitting out"
+        );
 
         // Whole seconds are the documented form and must parse identically.
         let whole = r#"{"error":{"details":[{"retryDelay":"7s"}]}}"#;
         assert_eq!(retry_after(whole), Some(Duration::from_secs(7)));
 
         // No RetryInfo, no details, not JSON: the caller falls back to backoff.
-        assert_eq!(retry_after(r#"{"error":{"details":[{"@type":"x"}]}}"#), None);
+        assert_eq!(
+            retry_after(r#"{"error":{"details":[{"@type":"x"}]}}"#),
+            None
+        );
         assert_eq!(retry_after(r#"{"error":{"code":500}}"#), None);
         assert_eq!(retry_after("not json"), None);
         // A malformed duration is not a zero-second wait.
-        assert_eq!(retry_after(r#"{"error":{"details":[{"retryDelay":"soon"}]}}"#), None);
+        assert_eq!(
+            retry_after(r#"{"error":{"details":[{"retryDelay":"soon"}]}}"#),
+            None
+        );
     }
 
     #[test]
@@ -734,8 +774,14 @@ mod tests {
         let quota = r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.","status":"RESOURCE_EXHAUSTED"}}"#;
         let shown = operator_error(429, quota);
         assert!(shown.contains("한도"), "{shown}");
-        assert!(!shown.contains("billing"), "the provider's copy must not reach the panel: {shown}");
-        assert!(shown.chars().count() < 60, "a mid-flight line must be readable at a glance: {shown}");
+        assert!(
+            !shown.contains("billing"),
+            "the provider's copy must not reach the panel: {shown}"
+        );
+        assert!(
+            shown.chars().count() < 60,
+            "a mid-flight line must be readable at a glance: {shown}"
+        );
 
         let bad_key = r#"{"error":{"code":403,"message":"API key not valid."}}"#;
         assert!(operator_error(403, bad_key).contains("키"), "{bad_key}");
@@ -744,13 +790,19 @@ mod tests {
         // 502 on every probe - so it gets a line that says what to do.
         let gateway = operator_error(502, "<!DOCTYPE html><title>502 Bad gateway</title>");
         assert!(gateway.contains("공급자"), "{gateway}");
-        assert!(!gateway.contains("DOCTYPE"), "an HTML error page must not reach the panel: {gateway}");
+        assert!(
+            !gateway.contains("DOCTYPE"),
+            "an HTML error page must not reach the panel: {gateway}"
+        );
 
         // Anything unexpected still surfaces the server's own words verbatim,
         // because inventing a category would hide the only clue there is.
         let odd = r#"{"error":{"code":400,"message":"tool schema is malformed"}}"#;
         let passthrough = operator_error(400, odd);
-        assert!(passthrough.contains("tool schema is malformed"), "{passthrough}");
+        assert!(
+            passthrough.contains("tool schema is malformed"),
+            "{passthrough}"
+        );
         assert!(passthrough.contains("400"), "{passthrough}");
     }
 
@@ -762,8 +814,14 @@ mod tests {
             .iter()
             .map(|c| {
                 (
-                    c["function"]["name"].as_str().unwrap_or_default().to_owned(),
-                    c["function"]["arguments"].as_str().unwrap_or_default().to_owned(),
+                    c["function"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    c["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
                 )
             })
             .collect()
@@ -817,13 +875,19 @@ mod tests {
         let id = assembled["choices"][0]["message"]["tool_calls"][0]["id"]
             .as_str()
             .expect("id");
-        assert!(!id.is_empty(), "a result with no tool_call_id cannot be matched to its call");
+        assert!(
+            !id.is_empty(),
+            "a result with no tool_call_id cannot be matched to its call"
+        );
     }
 
     #[test]
     fn a_non_streaming_server_answering_a_streamed_request_still_parses() {
         // Some backends ignore `stream` and send one `message` chunk.
         let sse = "data: {\"choices\":[{\"message\":{\"tool_calls\":[{\"index\":0,\"id\":\"z\",\"function\":{\"name\":\"observe\",\"arguments\":\"{}\"}}]}}]}\n";
-        assert_eq!(calls_of(&assemble_stream(sse)), vec![("observe".to_owned(), "{}".to_owned())]);
+        assert_eq!(
+            calls_of(&assemble_stream(sse)),
+            vec![("observe".to_owned(), "{}".to_owned())]
+        );
     }
 }

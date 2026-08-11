@@ -23,14 +23,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Two reasons for a git pin rather than the 9.0.0 release, and both are
 # load-bearing:
-#   - the Windows FFmpeg master snapshot exposes a newer side-data enum than
+#   - the pinned Windows FFmpeg 8.1 archive exposes a newer side-data enum than
 #     the release-version guard expects, which `non-exhaustive-enums` absorbs;
 #   - every FFmpeg older than 7.0 selects this crate's `legacy_*` modules, and
 #     until `ede2410f` those still carried edition-2015 `use ffi::*` paths
 #     against a crate declaring edition 2024 - a hard compile error. That is
-#     invisible on Windows, which builds against master, and fatal on every
-#     Ubuntu LTS: 22.04 ships FFmpeg 4.4 (16 errors) and 24.04 ships 6.1 (1).
-# Pinned rather than tracking master so bindgen output stays reproducible.
+#     invisible on Windows, which builds against that archive, and fatal on
+#     every Ubuntu LTS: 22.04 ships FFmpeg 4.4 (16 errors) and 24.04 ships 6.1
+#     (1). Pinned rather than tracking master so bindgen output stays reproducible.
 # `format` is needed internally by ffmpeg-next's scaler module.
 ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", rev = "3751e2800d5d2f0215d69031285aadebac5db8fc", default-features = false, features = ["codec", "format", "software-scaling", "non-exhaustive-enums"] }
 # Native detector parity with the former JS path. `simd` selects the crate's
@@ -57,4 +57,4 @@ tokio = { version = "1", features = ["time"] }
 # and a cloud STT would need a provider the router does not have connected.
 # whisper.cpp runs the same on both and needs no key and no network.
 cpal = "0.15"
-whisper-rs = { version = "0.14", default-features = false }
+whisper-rs = { version = "=0.16.0", default-features = false }

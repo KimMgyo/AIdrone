@@ -43,19 +43,29 @@ $installed = $null
 if ($text -match 'File /a "/oname=([^"]*aidrone-link\.ps1)"') { $installed = $Matches[1] }
 Check 'aidrone-link.ps1 is bundled' ($null -ne $installed)
 
-# And where the scheduled task will look for it.
+# The hook keeps the destination names as NSIS macros. Resolve those macro
+# definitions first, then ensure the task body actually uses the same values.
 $hooks = Get-Content -Raw (Join-Path $here 'hooks.nsh')
-
-# $PLUGINSDIR starts empty in an NSIS installer. The hook creates its XML there
-# before passing it to schtasks, so verify order rather than accepting an
-# installer whose firewall rule succeeds while its scheduled task is absent.
-if ($hooks -match '\$PLUGINSDIR') {
+$taskXml = $null
+if ($hooks -match '(?m)^\s*!define\s+AID_TASK_XML\s+"\$PLUGINSDIR\\([^"]+\.xml)"') {
+  $taskXml = $Matches[1]
+}
+Check 'task XML stays in $PLUGINSDIR' ($null -ne $taskXml) `
+      'AID_TASK_XML must resolve beneath $PLUGINSDIR'
+if ($taskXml) {
   Check 'task XML initializes $PLUGINSDIR first' `
-        ($hooks -match '(?s)InitPluginsDir.*FileOpen\s+\$0\s+"\$PLUGINSDIR\\aidrone-task\.xml"') `
-        'call InitPluginsDir before FileOpen $PLUGINSDIR\\aidrone-task.xml'
+        ($hooks -match '(?s)InitPluginsDir.*FileOpen\s+\$\d+\s+"\$\{AID_TASK_XML\}"') `
+        'call InitPluginsDir before FileOpen ${AID_TASK_XML}'
+}
+
+$linkScript = $null
+if ($hooks -match '(?m)^\s*!define\s+AID_LINK_SCRIPT\s+"\$INSTDIR\\([^"]*aidrone-link\.ps1)"') {
+  $linkScript = $Matches[1]
 }
 $referenced = $null
-if ($hooks -match '-File "\$INSTDIR\\([^"]*aidrone-link\.ps1)"') { $referenced = $Matches[1] }
+if ($linkScript -and $hooks -match '-File "\$\{AID_LINK_SCRIPT\}"') {
+  $referenced = $linkScript
+}
 Check 'the task references a path' ($null -ne $referenced)
 
 if ($installed -and $referenced) {
@@ -63,11 +73,9 @@ if ($installed -and $referenced) {
         "installer writes '$installed', task runs '$referenced'"
 }
 
-# The channels the event trigger subscribes to have to be present and enabled,
-# or schtasks rejects the whole registration. Require both subscriptions first:
-# a deleted/misspelled literal must fail rather than silently skip this check.
-foreach ($channel in @('Microsoft-Windows-Kernel-PnP/Configuration',
-                       'Microsoft-Windows-NetworkProfile/Operational')) {
+# The logon trigger is the fallback; Kernel-PnP is the sole device-arrival
+# EventTrigger. The channel has to exist and be enabled or schtasks rejects it.
+foreach ($channel in @('Microsoft-Windows-Kernel-PnP/Configuration')) {
   $subscribed = $hooks -match [regex]::Escape($channel)
   Check "event subscription includes: $channel" $subscribed `
         'missing from the task EventTrigger'

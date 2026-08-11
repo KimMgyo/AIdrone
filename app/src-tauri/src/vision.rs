@@ -56,7 +56,10 @@ const YOLO_INTRA_THREADS: usize = 4;
 /// `ort` itself makes repeated calls idempotent for test and reload safety.
 pub(crate) fn init_onnx_runtime(path: &Path) -> Result<(), String> {
     if !path.is_file() {
-        return Err(format!("ONNX Runtime library not found: {}", path.display()));
+        return Err(format!(
+            "ONNX Runtime library not found: {}",
+            path.display()
+        ));
     }
     ort::init_from(path)
         .map_err(|error| format!("load ONNX Runtime from {}: {error}", path.display()))?

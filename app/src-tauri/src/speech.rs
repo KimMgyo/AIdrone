@@ -49,7 +49,8 @@ unsafe impl Send for Recording {}
 /// Resolve the packaged model first; the manifest fallback keeps `tauri dev`
 /// working. Mirrors `yolo_model_path` so both models are found the same way.
 fn model_path(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let name = std::env::var("AIDRONE_WHISPER_MODEL").unwrap_or_else(|_| "ggml-base-q5_1.bin".to_owned());
+    let name =
+        std::env::var("AIDRONE_WHISPER_MODEL").unwrap_or_else(|_| "ggml-base-q5_1.bin".to_owned());
     let resource = app
         .path()
         .resolve(format!("models/{name}"), BaseDirectory::Resource)
@@ -115,7 +116,10 @@ pub fn dictate_ready(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn dictate_start(state: tauri::State<'_, Dictation>) -> Result<(), String> {
-    let mut slot = state.active.lock().map_err(|_| "dictation lock".to_owned())?;
+    let mut slot = state
+        .active
+        .lock()
+        .map_err(|_| "dictation lock".to_owned())?;
     if slot.is_some() {
         return Ok(()); // already listening; starting twice is not an error
     }
@@ -164,8 +168,15 @@ pub fn dictate_start(state: tauri::State<'_, Dictation>) -> Result<(), String> {
     }
     .map_err(|e| format!("마이크를 열지 못했습니다: {e}"))?;
 
-    stream.play().map_err(|e| format!("녹음을 시작하지 못했습니다: {e}"))?;
-    *slot = Some(Recording { stream, samples, rate, channels });
+    stream
+        .play()
+        .map_err(|e| format!("녹음을 시작하지 못했습니다: {e}"))?;
+    *slot = Some(Recording {
+        stream,
+        samples,
+        rate,
+        channels,
+    });
     Ok(())
 }
 
@@ -187,7 +198,9 @@ fn is_non_speech(said: &str) -> bool {
     // `trimmed[1..]` panics the moment a transcript opens with a Hangul
     // syllable rather than a bracket.
     for (open, close) in [('[', ']'), ('(', ')'), ('（', '）')] {
-        let Some(inner) = trimmed.strip_prefix(open).and_then(|rest| rest.strip_suffix(close))
+        let Some(inner) = trimmed
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
         else {
             continue;
         };
@@ -204,7 +217,10 @@ pub async fn dictate_stop(
     state: tauri::State<'_, Dictation>,
 ) -> Result<String, String> {
     let recorded = {
-        let mut slot = state.active.lock().map_err(|_| "dictation lock".to_owned())?;
+        let mut slot = state
+            .active
+            .lock()
+            .map_err(|_| "dictation lock".to_owned())?;
         let Some(recording) = slot.take() else {
             return Ok(String::new());
         };
@@ -234,11 +250,8 @@ pub async fn dictate_stop(
 }
 
 fn transcribe(model: &PathBuf, pcm: &[f32]) -> Result<String, String> {
-    let context = WhisperContext::new_with_params(
-        &model.to_string_lossy(),
-        WhisperContextParameters::default(),
-    )
-    .map_err(|e| format!("음성 모델을 열지 못했습니다: {e}"))?;
+    let context = WhisperContext::new_with_params(model, WhisperContextParameters::default())
+        .map_err(|e| format!("음성 모델을 열지 못했습니다: {e}"))?;
     let mut session = context
         .create_state()
         .map_err(|e| format!("음성 인식 준비 실패: {e}"))?;
@@ -257,15 +270,21 @@ fn transcribe(model: &PathBuf, pcm: &[f32]) -> Result<String, String> {
         .full(params, pcm)
         .map_err(|e| format!("음성 인식 실패: {e}"))?;
 
-    let segments = session.full_n_segments().map_err(|e| format!("음성 인식 결과 없음: {e}"))?;
+    let segments = session.full_n_segments();
     let mut said = String::new();
     for i in 0..segments {
-        if let Ok(text) = session.full_get_segment_text(i) {
-            said.push_str(&text);
+        if let Some(segment) = session.get_segment(i) {
+            if let Ok(text) = segment.to_str() {
+                said.push_str(text);
+            }
         }
     }
     let said = said.trim();
-    Ok(if is_non_speech(said) { String::new() } else { said.to_owned() })
+    Ok(if is_non_speech(said) {
+        String::new()
+    } else {
+        said.to_owned()
+    })
 }
 
 #[cfg(test)]
@@ -287,7 +306,11 @@ mod tests {
         assert_eq!(out.len(), 16_000);
         // Still a ramp from 0 to ~1: interpolation must not shuffle the signal.
         assert!(out[0].abs() < 1e-6, "{}", out[0]);
-        assert!((out[out.len() - 1] - 1.0).abs() < 0.01, "{}", out[out.len() - 1]);
+        assert!(
+            (out[out.len() - 1] - 1.0).abs() < 0.01,
+            "{}",
+            out[out.len() - 1]
+        );
     }
 
     #[test]
