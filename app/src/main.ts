@@ -740,6 +740,7 @@ setInterval(() => {
 
   const videoLive = linkOk && stats.painted > 0;
   const model: StationModel = {
+    ipcMs: stats.transportP50Ms,
     mode,
     live: videoLive,
     node: link?.node ?? "--",

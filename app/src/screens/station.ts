@@ -28,6 +28,12 @@ export type StationModel = {
   tello: string;
   /** Measured receive-to-paint p50, not a command round-trip time. */
   rttMs: number | null;
+  /** The transport half of that same number: Rust's arrival stamp to the
+   *  moment the WebView was handed the bytes. Shown beside the total because
+   *  the two halves have opposite fixes - a large IPC number is the Tauri hop,
+   *  a large remainder is decode plus however long the compositor made the
+   *  paint wait. */
+  ipcMs: number | null;
   bat: number | null;
   /** Motor-on seconds, straight off the drone's state datagram. */
   flightS: number | null;
@@ -194,6 +200,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       <div>RX <span data-k="rx">--</span> pkt/s</div>
       <div><span data-k="mbps">--</span> Mb/s</div>
       <div>GAP <span data-k="gap">--</span> ms</div>
+      <div>IPC <span data-k="ipc">--</span> ms</div>
       <div>DROP <span data-k="drop">--</span></div>
       <div data-k="link" class="text-dim2">LINK IDLE</div>
     </div>
@@ -233,6 +240,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     rx: q("rx", HTMLSpanElement),
     mbps: q("mbps", HTMLSpanElement),
     gap: q("gap", HTMLSpanElement),
+    ipc: q("ipc", HTMLSpanElement),
     drop: q("drop", HTMLSpanElement),
     link: q("link", HTMLDivElement),
     glLeft: q("gl-left", HTMLDivElement),
@@ -367,6 +375,8 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       text(cell.rx, rx === null ? MISSING : String(rx));
       text(cell.mbps, mbps === null ? MISSING : mbps.toFixed(2));
       text(cell.gap, gap === null ? MISSING : String(gap));
+      const ipc = finite(m.ipcMs);
+      text(cell.ipc, ipc === null ? MISSING : ipc.toFixed(1));
       text(cell.drop, dropped === null ? MISSING : String(dropped));
 
       text(cell.link, !m.live ? "LINK IDLE" : m.linkOk ? "LINK STABLE" : "LINK SILENT");

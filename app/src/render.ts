@@ -51,18 +51,15 @@ export interface VideoRendererOptions {
  * 4 s window -- long enough to be stable, short enough to react. */
 const LATENCY_WINDOW = 100;
 
-/** Frames decoded but not yet painted.
+/** Depth past which a decoder burst is treated as backlog rather than as
+ * bundling.
  *
- * Measured on this hardware: rAF runs at 144 Hz and the stream is 26 fps, so
- * a queue should never form - yet holding exactly one frame and dropping the
- * older one whenever a second arrived first threw away 76 of 178 live frames
- * and halved the displayed rate to 13 fps. Two decoder outputs really do land
- * between vsyncs; what makes them do it is not established (link-side arrival
- * gaps are 34 ms at p50 but reach 0.1 ms at the low tail, and USB-NCM bundles
- * several Ethernet frames into one transfer). Discarding one bought nothing
- * either way: the next vsync was 6.9 ms out. Queue two, paint one per rAF,
- * drop only past that - paced 30 fps and arrivals bundled in pairs both give
- * 0 dropped, so `dropped` climbing now means bundles deeper than this queue. */
+ * Painting now happens on arrival, so a queue can only form inside one
+ * `decode()` callback - two decoder outputs really do land together (link-side
+ * arrival gaps are 34 ms at p50 but reach 0.1 ms at the low tail, and USB-NCM
+ * bundles several Ethernet frames into one transfer). Both get drawn; the
+ * limit only bounds a pathological burst, and `dropped` climbing means bundles
+ * deeper than this. */
 const PAINT_QUEUE_MAX = 2;
 
 export class VideoRenderer {
@@ -71,10 +68,10 @@ export class VideoRenderer {
   private readonly stream: H264Stream;
   private postPaintCallback: VideoPostPaintCallback | null = null;
 
-  /** Decoded and waiting for a vsync. Each carries its own receive stamp on
-   * `frame.timestamp` - see push(). */
+  /** Decoded and not yet drawn - normally empty, since `onDecoded` drains it
+   * synchronously. Each frame carries its own receive stamp on
+   * `frame.timestamp`; see push(). */
   private readonly queue: VideoFrame[] = [];
-  private rafHandle = 0;
   private closed = false;
 
   private readonly latenciesMs: number[] = [];
@@ -151,10 +148,8 @@ export class VideoRenderer {
   close(): void {
     this.closed = true;
     this.postPaintCallback = null;
-    if (this.rafHandle !== 0) {
-      cancelAnimationFrame(this.rafHandle);
-      this.rafHandle = 0;
-    }
+    // Nothing is scheduled any more: paints happen inside onDecoded, so a
+    // closed renderer simply stops being called.
     for (const frame of this.queue) frame.close();
     this.queue.length = 0;
     this.stream.close();
@@ -177,11 +172,22 @@ export class VideoRenderer {
       if (stale) stale.close();
       this.droppedOnBacklog++;
     }
-    if (this.rafHandle === 0) this.rafHandle = requestAnimationFrame(this.paint);
+    // Paint here, not on the next animation frame. A pilot's picture is worth
+    // exactly what it costs in age, and `requestAnimationFrame` charges a
+    // whole refresh interval for the privilege of being tidy: measured on a
+    // 60 Hz Wayland laptop, receive-to-paint sat at 30 ms against ~5 ms of
+    // real work, because a frame that lands just after a frame callback waits
+    // out the entire next one. Drawing on arrival costs at most one extra
+    // drawImage when two decoder outputs land inside one refresh - the
+    // compositor shows the last one either way.
+    this.drainQueue();
+  }
+
+  private drainQueue(): void {
+    while (this.queue.length > 0 && !this.closed) this.paint();
   }
 
   private readonly paint = (): void => {
-    this.rafHandle = 0;
     const frame = this.queue.shift();
     if (!frame) return;
     let postPaint: VideoPostPaintCallback | null = null;
@@ -229,11 +235,6 @@ export class VideoRenderer {
       } catch (err) {
         this.noteError(err);
       }
-    }
-    // One paint per vsync: a queued frame waits for the next one rather than
-    // being drawn over immediately, which would waste the decode.
-    if (this.queue.length > 0 && !this.closed) {
-      this.rafHandle = requestAnimationFrame(this.paint);
     }
   };
 
