@@ -623,8 +623,56 @@ fn probe_video() -> serde_json::Value {
     }
 }
 
+/// Decoder policy for the Linux WebView, published before WebKit forks its web
+/// process (which inherits this environment).
+///
+/// WebKitGTK's WebCodecs backend does not act on the
+/// `hardwareAcceleration: "prefer-software"` hint the decoder is configured
+/// with - it takes whichever GStreamer element ranks highest for the caps. On a
+/// machine with a VA-API or NVDEC plugin installed that is a hardware decoder,
+/// and the Tello's SPS carries no VUI, which is the stream shape those handle
+/// worst: the equivalent Chromium path filled a 12-frame DPB (470 ms, README),
+/// and WebKitGTK fails outright with a bare `decode error`. libav's
+/// `avdec_h264` costs ~1.2 ms per 960x720 frame and honours the low-latency
+/// hint, so it is pinned and the hardware elements are ranked away.
+///
+/// Measured on WebKitGTK 2.52.3 / Ubuntu 26.04: with `avdec_h264:NONE` the same
+/// stream reports `NotSupportedError: No decoder found for codec avc1.4d4028`,
+/// with `avdec_h264:MAX` it decodes every frame - the variable is honoured, and
+/// it is the only lever that reaches this decision.
+#[cfg(target_os = "linux")]
+const SOFTWARE_H264_RANK: &str = concat!(
+    "avdec_h264:MAX,",
+    "vah264dec:NONE,vah264lpdec:NONE,vaapih264dec:NONE,",
+    "nvh264dec:NONE,nvh264sldec:NONE,",
+    "v4l2h264dec:NONE,v4l2slh264dec:NONE,msdkh264dec:NONE"
+);
+
+/// The value to publish as `GST_PLUGIN_FEATURE_RANK`, or `None` when the
+/// operator already set one - an explicit override always wins, including the
+/// blank-but-present case, which is how a shell says "leave this alone".
+#[cfg(target_os = "linux")]
+fn software_h264_rank(existing: Option<&str>) -> Option<&'static str> {
+    match existing {
+        Some(_) => None,
+        None => Some(SOFTWARE_H264_RANK),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_software_h264_decoder() {
+    const VAR: &str = "GST_PLUGIN_FEATURE_RANK";
+    if let Some(rank) = software_h264_rank(std::env::var(VAR).ok().as_deref()) {
+        std::env::set_var(VAR, rank);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any GStreamer registry load: WebKit's web process inherits this.
+    #[cfg(target_os = "linux")]
+    pin_software_h264_decoder();
+
     tauri::Builder::default()
         .setup(|app| -> Result<(), Box<dyn std::error::Error>> {
             let runtime = onnx_runtime_path(&app.handle()).map_err(std::io::Error::other)?;
@@ -667,4 +715,23 @@ pub fn run() {
                 drop(taken);
             }
         });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{software_h264_rank, SOFTWARE_H264_RANK};
+
+    #[test]
+    fn pins_libav_when_the_operator_set_nothing() {
+        assert_eq!(software_h264_rank(None), Some(SOFTWARE_H264_RANK));
+        assert!(SOFTWARE_H264_RANK.contains("avdec_h264:MAX"));
+        assert!(SOFTWARE_H264_RANK.contains("vah264dec:NONE"));
+    }
+
+    #[test]
+    fn an_existing_rank_is_never_overwritten() {
+        assert_eq!(software_h264_rank(Some("nvh264dec:MAX")), None);
+        // A present-but-blank value is a deliberate "leave GStreamer alone".
+        assert_eq!(software_h264_rank(Some("")), None);
+    }
 }

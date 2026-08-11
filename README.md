@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.1_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.2_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -174,9 +174,41 @@ sudo apt update
 sudo apt install -y gstreamer1.0-libav
 ```
 
-`gstreamer1.0-libav` supplies `avdec_h264`, the software decoder selected by
-the application's low-latency WebCodecs configuration. It is available on
-Ubuntu 22.04, 24.04, and 26.04.
+`gstreamer1.0-libav` supplies `avdec_h264`, the software decoder this
+application pins on Linux. It is available on Ubuntu 22.04, 24.04, and 26.04.
+
+**Why it is pinned.** WebKitGTK's WebCodecs backend does not act on the
+`hardwareAcceleration: "prefer-software"` hint the decoder is configured with -
+it takes whichever GStreamer element ranks highest for the caps. On a machine
+that also has a VA-API or NVDEC plugin installed that is a hardware decoder,
+and the Tello's SPS carries no VUI, which is the stream shape those handle
+worst: the equivalent Chromium path filled a 12-frame DPB (see *the 502 ms
+reading was the decoder's DPB* below) and WebKitGTK fails outright with a bare
+`decode error`. So the app publishes, before WebKit forks its web process:
+
+```
+GST_PLUGIN_FEATURE_RANK=avdec_h264:MAX,vah264dec:NONE,vah264lpdec:NONE,
+vaapih264dec:NONE,nvh264dec:NONE,nvh264sldec:NONE,v4l2h264dec:NONE,
+v4l2slh264dec:NONE,msdkh264dec:NONE
+```
+
+Setting `GST_PLUGIN_FEATURE_RANK` yourself disables that default entirely -
+the app never overwrites an operator's value. To see what the machine offers,
+run `gst-inspect-1.0 | grep -i h264`.
+
+**Reading a failure.** When the picture never arrives the app now names the
+decision it made:
+
+```
+video did not paint within 5000 ms
+  (decoder: No decoder found for codec avc1.42c01f;
+   codec avc1.42c01f, isConfigSupported=false)
+```
+
+`isConfigSupported=false` means this WebView has no H.264 decoder at all -
+install `gstreamer1.0-libav`. `isConfigSupported=true` with a decoder error
+means one was found and the stream broke it, which is the hardware-element
+case above; check whether `GST_PLUGIN_FEATURE_RANK` is being overridden.
 
 Neither assigns a default gateway. One here would route the machine's internet
 traffic down a USB cable to a drone.
@@ -219,8 +251,8 @@ subnet once a second and prints anything that answers.
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.1_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.1_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.2_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.2_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -273,7 +305,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.1_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.2_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:

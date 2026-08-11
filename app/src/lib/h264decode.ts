@@ -202,6 +202,11 @@ export class H264Stream {
   private prefixNals: AnnexBNal[] = [];
   private sps: Uint8Array | null = null;
   private decoder: VideoDecoder | null = null;
+  /** The exact config the live decoder was built from, kept so a failure can
+   *  be reported against what was actually asked for - `isConfigSupported`
+   *  on this object separates "this WebView has no H.264 decoder" from "it
+   *  has one and the stream broke it". Null until the first SPS arrives. */
+  private lastConfig: VideoDecoderConfig | null = null;
   private nextTimestampUs = 0;
   /** Caller-supplied timestamp for the access unit(s) completed by the push
    * currently executing. Set so the decoded VideoFrame carries the caller's
@@ -216,6 +221,11 @@ export class H264Stream {
 
   constructor(cb: H264StreamCallbacks) {
     this.cb = cb;
+  }
+
+  /** The configuration in force, for diagnostics only. */
+  configuration(): VideoDecoderConfig | null {
+    return this.lastConfig;
   }
 
   /** Feeds one newly arrived chunk of raw bytes (e.g. one WS binary frame's
@@ -298,7 +308,7 @@ export class H264Stream {
         output: (frame) => this.cb.onFrame(frame),
         error: (e) => this.reportError(e),
       });
-      decoder.configure({
+      const config: VideoDecoderConfig = {
         codec: spsToCodecString(sps),
         // Live low-latency tracking, not a media player -- prioritize
         // getting frames out over throughput/quality tradeoffs a general
@@ -324,7 +334,9 @@ export class H264Stream {
         // magnitude. Revisit only if the source ever emits a sane VUI.
         hardwareAcceleration: "prefer-software",
         avc: { format: "annexb" },
-      });
+      };
+      this.lastConfig = config;
+      decoder.configure(config);
       this.decoder = decoder;
     } catch (err) {
       this.reportError(err);

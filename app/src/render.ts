@@ -130,6 +130,14 @@ export class VideoRenderer {
     };
   }
 
+  /** The decoder configuration this session is running, or null if no SPS has
+   *  arrived yet. Only the failure path reads it: `isConfigSupported` on this
+   *  object is what separates a WebView with no H.264 decoder from one whose
+   *  decoder took the stream and broke on it. */
+  decoderConfiguration(): VideoDecoderConfig | null {
+    return this.stream.configuration();
+  }
+
   /**
    * Replaces the optional post-paint consumer. Passing null restores the
    * original paint-only path: no canvas readback and no ImageData allocation.

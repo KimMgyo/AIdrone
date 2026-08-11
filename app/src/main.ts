@@ -511,6 +511,29 @@ async function runProbe(): Promise<void> {
   }
 }
 
+/** Why the picture never arrived, in the terms the next fix needs.
+ *
+ * "no decoder output" alone cost a full round of guessing once already: it
+ * cannot tell a WebView with no H.264 decoder at all (WebKitGTK without
+ * `gstreamer1.0-libav`) from one that took the stream and broke on it (a
+ * hardware GStreamer element that cannot hold this SPS). `isConfigSupported`
+ * on the exact configuration in force answers that in one line, and it runs
+ * only here - the failure path - so a healthy connect pays nothing. */
+async function firstPaintFailure(candidate: VideoRenderer): Promise<string> {
+  const stats = candidate.stats();
+  const detail = stats.lastError === null ? "no decoder output" : `decoder: ${stats.lastError}`;
+  const config = candidate.decoderConfiguration();
+  if (config === null) return `${detail}; decoder never configured (no SPS/IDR in the stream yet)`;
+
+  let supported: string;
+  try {
+    supported = String((await VideoDecoder.isConfigSupported(config)).supported);
+  } catch (err) {
+    supported = `probe failed: ${errText(err)}`;
+  }
+  return `${detail}; codec ${config.codec}, isConfigSupported=${supported}`;
+}
+
 /** Waits for the last connection boundary: a real decoded frame on this
  * canvas. The native handshake has already proved UDP ingress by this point,
  * but a missing WebKit/GStreamer decoder would otherwise look connected and
@@ -523,8 +546,9 @@ async function waitForFirstPaint(candidate: VideoRenderer): Promise<void> {
 
     const remaining = deadline - performance.now();
     if (remaining <= 0) {
-      const cause = stats.lastError === null ? "no decoder output" : `decoder: ${stats.lastError}`;
-      throw new Error(`video did not paint within ${FIRST_PAINT_TIMEOUT_MS} ms (${cause})`);
+      throw new Error(
+        `video did not paint within ${FIRST_PAINT_TIMEOUT_MS} ms (${await firstPaintFailure(candidate)})`,
+      );
     }
     await new Promise<void>((resolve) => window.setTimeout(resolve, Math.min(FIRST_PAINT_POLL_MS, remaining)));
   }
