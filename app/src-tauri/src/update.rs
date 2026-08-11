@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 /// GitHub's own hostname requirement, and a courtesy: an unversioned agent is
 /// rejected outright.
 const USER_AGENT: &str = concat!("AIdrone/", env!("CARGO_PKG_VERSION"));
-const RELEASES_URL: &str = "https://api.github.com/repos/KimMgyo/AIdrone/releases?per_page=8";
+const RELEASES_URL: &str = "https://api.github.com/repos/KimMgyo/AIdrone/releases?per_page=40";
+/// One release-list request per launch; a slow answer must not delay the app.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// A release's assets are ~90 MB apiece; a slow hotel link should not fail one.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -132,12 +133,20 @@ fn asset_for_platform<'a>(assets: &'a [GhAsset], linux_suffix: Option<&str>) -> 
     assets.iter().find(|asset| asset.name.ends_with(&wanted))
 }
 
-/// The newest release carrying a newer artifact for this platform.
-fn pick<'a>(
-    releases: &'a [GhRelease],
+/// The highest version any release offers for this platform, or None when this
+/// build is already it.
+///
+/// Deliberately a maximum rather than "the first one": `GET /releases` does not
+/// come back newest-first. Measured against this repository, page one arrived
+/// as 0.1.2, 0.1.11, 0.1.8 - ordered by tag name, which here is a commit SHA
+/// and therefore arbitrary. Taking the first newer entry found an old build and
+/// missed the current one entirely.
+fn pick(
+    releases: &[GhRelease],
     current: &str,
     linux_suffix: Option<&str>,
 ) -> Option<AvailableUpdate> {
+    let mut best: Option<AvailableUpdate> = None;
     for release in releases {
         let Some(asset) = asset_for_platform(&release.assets, linux_suffix) else {
             continue;
@@ -152,7 +161,13 @@ fn pick<'a>(
             // Refuse what cannot be checked rather than install it blind.
             continue;
         };
-        return Some(AvailableUpdate {
+        if best
+            .as_ref()
+            .is_some_and(|found| !is_newer(&version, &found.version))
+        {
+            continue;
+        }
+        best = Some(AvailableUpdate {
             version,
             tag: release.tag_name.clone(),
             asset: asset.name.clone(),
@@ -161,7 +176,7 @@ fn pick<'a>(
             size: asset.size,
         });
     }
-    None
+    best
 }
 
 #[cfg(target_os = "linux")]
@@ -619,6 +634,30 @@ mod tests {
             Some(0)
         );
         assert_eq!(effective_uid_from("Name:\tapp\n"), None);
+    }
+
+    /// The bug this test exists for: `GET /releases` came back 0.1.2, 0.1.11,
+    /// 0.1.8 - tag order, not time order - and taking the first newer entry
+    /// offered 0.1.11 while 0.1.13 sat further down the same page.
+    #[test]
+    fn the_highest_version_wins_whatever_order_github_used() {
+        let suffix = if cfg!(target_os = "linux") { Some("ubuntu26") } else { None };
+        let name_of = |version: &str| {
+            if cfg!(target_os = "linux") {
+                format!("AIdrone_{version}_amd64_ubuntu26.deb")
+            } else {
+                format!("AIdrone_{version}_x64-setup.exe")
+            }
+        };
+        let shuffled: Vec<GhRelease> = ["0.1.2", "0.1.11", "0.1.8", "0.1.13", "0.1.9"]
+            .iter()
+            .map(|version| release(&[&name_of(version)]))
+            .collect();
+        assert_eq!(
+            pick(&shuffled, "0.1.10", suffix).map(|found| found.version),
+            Some("0.1.13".to_owned())
+        );
+        assert!(pick(&shuffled, "0.1.13", suffix).is_none());
     }
 
     #[test]
