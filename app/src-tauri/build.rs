@@ -55,6 +55,9 @@ fn stage_ffmpeg_dlls() {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
+    // `copilot.rs` reads this through `option_env!`, so a changed - or newly
+    // supplied - demo key has to invalidate the compiled constant.
+    println!("cargo:rerun-if-env-changed=AIDRONE_COPILOT_KEY");
     stage_ffmpeg_dlls();
     tauri_build::build()
 }

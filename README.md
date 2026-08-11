@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.3_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.4_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -251,8 +251,8 @@ subnet once a second and prints anything that answers.
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.3_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.3_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.4_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.4_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -305,7 +305,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.3_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.4_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:
@@ -787,6 +787,24 @@ The live UI is a ground station, not a floating viewer:
 - The API key lives only in Rust (`%APPDATA%\com.g433m.aidrone\copilot-key`, or
   `COPILOT_API_KEY`). The WebView never sees it, and no error message can carry
   it.
+- **Published builds carry a demo key so a fresh machine can just run.** It is
+  compiled in from `AIDRONE_COPILOT_KEY` at build time - a repository secret in
+  CI, never a literal in this tree, because a key committed to a public repo is
+  revoked by secret scanning before the demo starts. Precedence is
+  `COPILOT_API_KEY` -> installed key file -> dev `.copilot-key` -> the compiled
+  demo key, so the shipped key is the floor and can never spend an operator's
+  own quota. A build made without the variable simply has none.
+
+  ```bash
+  # once, as the repo owner - then every release carries it
+  gh secret set AIDRONE_COPILOT_KEY --repo <owner>/<repo>
+
+  # a local build that bakes the same key in
+  AIDRONE_COPILOT_KEY="$(cat ~/.aidrone-copilot-key)" bun run tauri build
+  ```
+
+  Rotating it is one command plus one build: set the secret again, push (or
+  `gh workflow run release.yml`), and the old key is only in old artifacts.
 
 Every real command and RC update goes through the same Rust SDK socket. Ending
 a session neutralizes the sticks first, disables the console and manual panel,

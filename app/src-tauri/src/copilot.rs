@@ -117,11 +117,24 @@ fn client() -> Result<&'static reqwest::Client, String> {
     CLIENT.as_ref().map_err(Clone::clone)
 }
 
+/// A key compiled into this binary, when one was supplied at build time as
+/// `AIDRONE_COPILOT_KEY`. Release builds take it from a repository secret, so
+/// a demo machine runs the copilot with nothing to configure; a source
+/// checkout built without the variable simply has no built-in key.
+///
+/// It is deliberately the LAST candidate: an operator's own env var or key
+/// file always wins, so a shipped demo key can never quietly spend someone
+/// else's quota. The literal never appears in the repository - only in the
+/// artifact - which is what keeps secret scanning from revoking it the moment
+/// a build is published.
+const BUILT_IN_KEY: Option<&str> = option_env!("AIDRONE_COPILOT_KEY");
+
 /// Split from the env lookup so precedence is testable without mutating
 /// process-wide state.
 fn resolve_key_from(
     env_value: Option<String>,
     locations: &[KeyLocation],
+    built_in: Option<&str>,
 ) -> Result<String, String> {
     if let Some(raw) = env_value {
         let trimmed = raw.trim();
@@ -136,6 +149,12 @@ fn resolve_key_from(
         let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
         };
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+    }
+    if let Some(raw) = built_in {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             return Ok(trimmed.to_owned());
@@ -170,7 +189,11 @@ fn key_locations(app: &tauri::AppHandle) -> Vec<KeyLocation> {
 /// The key itself is never logged, echoed, or included in any error - not even
 /// a prefix. A wrong key is diagnosed from the router's own 401/403 text.
 fn api_key(app: &tauri::AppHandle) -> Result<String, String> {
-    resolve_key_from(std::env::var("COPILOT_API_KEY").ok(), &key_locations(app))
+    resolve_key_from(
+        std::env::var("COPILOT_API_KEY").ok(),
+        &key_locations(app),
+        BUILT_IN_KEY,
+    )
 }
 
 /// `COPILOT_MODEL` pins one model and disables the chain, because an operator
@@ -605,7 +628,11 @@ mod tests {
         let installed = scratch("installed-key");
         let dev = scratch("dev-key");
         assert_eq!(
-            resolve_key_from(Some("env-key".to_owned()), &[Ok(installed), Ok(dev)]),
+            resolve_key_from(
+                Some("env-key".to_owned()),
+                &[Ok(installed), Ok(dev)],
+                Some("built-in-key")
+            ),
             Ok("env-key".to_owned())
         );
     }
@@ -615,7 +642,7 @@ mod tests {
         let installed = scratch("  installed-key\r\n");
         let dev = scratch("dev-key");
         assert_eq!(
-            resolve_key_from(None, &[Ok(installed), Ok(dev)]),
+            resolve_key_from(None, &[Ok(installed), Ok(dev)], Some("built-in-key")),
             Ok("installed-key".to_owned())
         );
     }
@@ -627,7 +654,7 @@ mod tests {
         let empty = scratch("\n  \n");
         let dev = scratch("dev-key");
         assert_eq!(
-            resolve_key_from(Some("   ".to_owned()), &[Ok(empty), Ok(dev)]),
+            resolve_key_from(Some("   ".to_owned()), &[Ok(empty), Ok(dev)], None),
             Ok("dev-key".to_owned())
         );
     }
@@ -637,9 +664,32 @@ mod tests {
         let missing = std::env::temp_dir().join("aidrone-copilot-does-not-exist/copilot-key");
         let dev = scratch("dev-key");
         assert_eq!(
-            resolve_key_from(None, &[Ok(missing), Ok(dev)]),
+            resolve_key_from(None, &[Ok(missing), Ok(dev)], None),
             Ok("dev-key".to_owned())
         );
+    }
+
+    /// The demo key compiled into a release build is the floor, never the
+    /// answer when this machine has one of its own - a shipped key must not
+    /// quietly spend an operator's quota.
+    #[test]
+    fn the_built_in_key_is_the_last_resort() {
+        let dev = scratch("dev-key");
+        assert_eq!(
+            resolve_key_from(None, &[Ok(dev)], Some("  built-in-key\n")),
+            Ok("dev-key".to_owned())
+        );
+
+        let missing = std::env::temp_dir().join("aidrone-copilot-none/copilot-key");
+        assert_eq!(
+            resolve_key_from(None, &[Ok(missing.clone())], Some("  built-in-key\n")),
+            Ok("built-in-key".to_owned())
+        );
+
+        // A build with no key baked in still reports the setup rather than
+        // sending a blank Authorization header.
+        assert!(resolve_key_from(None, &[Ok(missing.clone())], None).is_err());
+        assert!(resolve_key_from(None, &[Ok(missing)], Some("   ")).is_err());
     }
 
     /// The whole point of the failure message: an operator fixes the setup
@@ -648,7 +698,7 @@ mod tests {
     fn missing_key_names_all_three_places() {
         let unresolved = "the per-user config directory (unavailable: no home)".to_owned();
         let dev = PathBuf::from("D:/app/src-tauri/.copilot-key");
-        let error = resolve_key_from(None, &[Err(unresolved.clone()), Ok(dev.clone())])
+        let error = resolve_key_from(None, &[Err(unresolved.clone()), Ok(dev.clone())], None)
             .expect_err("no key anywhere");
         assert!(error.contains("COPILOT_API_KEY"), "{error}");
         assert!(error.contains(&unresolved), "{error}");
@@ -657,7 +707,8 @@ mod tests {
 
     #[test]
     fn no_error_ever_carries_the_key() {
-        let error = resolve_key_from(None, &[Ok(scratch("   "))]).expect_err("blank file");
+        let error =
+            resolve_key_from(None, &[Ok(scratch("   "))], None).expect_err("blank file");
         assert!(!error.contains("copilot-key\":"), "{error}");
         assert!(error.contains("single line"), "{error}");
     }

@@ -71,8 +71,16 @@ jobs:
         working-directory: app
         run: bun install --frozen-lockfile
 
+      # AIDRONE_COPILOT_KEY is the demo key baked into published builds so the
+      # copilot answers on a fresh machine with nothing configured. It is a
+      # repository secret, never a literal in this tree: a key committed to a
+      # public repo is revoked by secret scanning before the demo runs. An
+      # unset secret simply produces a build with no key, which still takes
+      # COPILOT_API_KEY or the per-user key file.
       - name: Build NSIS installer
         working-directory: app
+        env:
+          AIDRONE_COPILOT_KEY: ${{ secrets.AIDRONE_COPILOT_KEY }}
         run: bun run tauri build --bundles nsis
 
       - name: Verify installer wiring
@@ -125,6 +133,8 @@ jobs:
 
       - name: Build release-specific Debian package
         working-directory: app
+        env:
+          AIDRONE_COPILOT_KEY: ${{ secrets.AIDRONE_COPILOT_KEY }}
         run: bash src-tauri/installer/linux/build-deb.sh
 
 
