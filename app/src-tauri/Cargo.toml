@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.4"
+version = "0.1.5"
 description = "Tello viewer over the USB-NCM cable - Rust owns the drone link, WebCodecs owns decode"
 authors = ["you"]
 edition = "2021"

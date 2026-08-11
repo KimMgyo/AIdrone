@@ -693,7 +693,20 @@ fn sps_with_low_delay_vui(nal: &[u8]) -> Option<Vec<u8>> {
     if bits.u1()? == 1 {
         return None;
     }
-
+    // Completeness check, and the reason a real drone is handled at all: the
+    // Tello puts its SPS in a datagram of its own, so there is no following
+    // start code to prove where the NAL ends. What proves it instead is the
+    // SPS's own ending - `rbsp_trailing_bits`: the stop bit, then zeros to the
+    // byte boundary, optionally followed by whole `trailing_zero_8bits`. A NAL
+    // cut mid-flight cannot produce that, and is left alone.
+    if bits.u1()? != 1 {
+        return None;
+    }
+    while let Some(bit) = bits.u1() {
+        if bit != 0 {
+            return None;
+        }
+    }
     let mut out = BitWriter::default();
     out.copy_bits(&rbsp, vui_flag_at);
     out.bit(1); // vui_parameters_present_flag
@@ -732,11 +745,14 @@ pub(crate) fn with_low_delay_sps(annex_b: &[u8]) -> Option<Vec<u8>> {
         if header & 0x1f != NAL_TYPE_SPS {
             continue;
         }
-        // Only a NAL the next start code closes is known to be complete; a
-        // trailing one may still be mid-flight.
-        let Some((next, _)) = find_start_code(annex_b, nal_at) else {
-            break;
-        };
+        // A NAL the next start code closes is complete by construction; one
+        // that ends the buffer is complete only if it ends in
+        // rbsp_trailing_bits, which `sps_with_low_delay_vui` checks. The Tello
+        // sends its SPS alone in a 13-byte datagram, so refusing that case
+        // meant the rewrite never ran on the real drone.
+        let next = find_start_code(annex_b, nal_at)
+            .map(|(next, _)| next)
+            .unwrap_or(annex_b.len());
         let Some(patched) = sps_with_low_delay_vui(&annex_b[nal_at..next]) else {
             continue;
         };
@@ -856,6 +872,36 @@ mod tests {
     const TELLO_SHAPED_SPS: [u8; 9] = [
         0x67, 0x42, 0xc0, 0x1f, 0xd9, 0x00, 0xf0, 0x16, 0xe4,
     ];
+
+    /// Captured off a real Tello (2026-08-12, 192.168.4.2 over USB-NCM): Main
+    /// profile, level 4.0, 960x720, `max_num_ref_frames = 1`, no VUI - and it
+    /// arrives ALONE in a 13-byte datagram, followed by one trailing zero
+    /// byte. Both properties are the test.
+    const REAL_TELLO_SPS: [u8; 10] = [
+        0x67, 0x4d, 0x40, 0x28, 0x95, 0xa0, 0x3c, 0x05, 0xb9, 0x00,
+    ];
+
+    #[test]
+    fn the_drones_own_sps_is_rewritten_even_alone_in_its_datagram() {
+        // Exactly what video.rs hands over: one short datagram, one NAL, no
+        // following start code to prove where it ends.
+        let mut datagram = vec![0, 0, 0, 1];
+        datagram.extend_from_slice(&REAL_TELLO_SPS);
+
+        let patched = with_low_delay_sps(&datagram).expect("the drone's SPS must be rewritten");
+        let (reorder, dpb) = reorder_declaration(&patched[4..]);
+        assert_eq!(reorder, 0, "the drone would otherwise buffer a 12-frame DPB");
+        assert_eq!(dpb, 1, "this stream keeps exactly one reference frame");
+    }
+
+    #[test]
+    fn a_half_arrived_sps_is_left_alone() {
+        // The same NAL cut mid-flight: no rbsp_trailing_bits, so nothing here
+        // can prove it is complete, and rewriting it would corrupt the stream.
+        let mut truncated = vec![0, 0, 0, 1];
+        truncated.extend_from_slice(&REAL_TELLO_SPS[..6]);
+        assert!(with_low_delay_sps(&truncated).is_none());
+    }
 
     /// Reads back the VUI this module writes and returns
     /// (max_num_reorder_frames, max_dec_frame_buffering).
