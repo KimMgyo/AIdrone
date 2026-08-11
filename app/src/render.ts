@@ -99,7 +99,9 @@ export class VideoRenderer {
   }
 
   /** Feeds one complete frame's Annex-B bytes, with the wall-clock epoch (us)
-   * Rust stamped when its last datagram arrived. */
+   * Rust stamped when its last UDP datagram arrived. Rust delimits these on
+   * the drone's own short datagram, so each call ends on a NAL boundary - see
+   * `H264Stream.push`'s `endOfBatch`, which is worth a frame of latency. */
   push(data: Uint8Array, recvEpochUs: number): void {
     if (this.closed) return;
     VideoRenderer.record(this.transportMs, VideoRenderer.ageMs(recvEpochUs));
@@ -107,7 +109,7 @@ export class VideoRenderer {
     // back on `frame.timestamp`. Pairing them outside the decoder - a FIFO of
     // stamps popped per output - silently skews the moment output count and
     // push count diverge, and then reports the skew as latency.
-    this.stream.push(data, recvEpochUs);
+    this.stream.push(data, recvEpochUs, true);
   }
 
   stats(): RenderStats {

@@ -347,7 +347,14 @@ impl H264AccessUnitAssembler {
     /// completed by this chunk when `emit` is true. Decoder bootstrap state is
     /// cached even while perception is disabled, without allocating complete
     /// non-seed access units.
-    pub(crate) fn push(&mut self, chunk: &[u8], emit: bool) -> Vec<Arc<Vec<u8>>> {
+    ///
+    /// `end_of_batch` says these bytes end on a NAL boundary. Annex-B has no
+    /// length prefix, so a trailing NAL is otherwise only provably complete
+    /// once the NEXT one starts - and the Tello sends one slice per picture,
+    /// so every picture would reach the detector a whole frame late. The UDP
+    /// receiver delimits its frames on the drone's own short datagram, which
+    /// is exactly that boundary.
+    pub(crate) fn push(&mut self, chunk: &[u8], emit: bool, end_of_batch: bool) -> Vec<Arc<Vec<u8>>> {
         self.pending.extend_from_slice(chunk);
         let mut access_units = Vec::new();
 
@@ -362,8 +369,11 @@ impl H264AccessUnitAssembler {
 
             let first_prefix_len =
                 start_code_len_at(&self.pending, 0).expect("start code was just located");
-            let Some((next_start, _)) = find_start_code(&self.pending, first_prefix_len) else {
-                break;
+            let next_start = match find_start_code(&self.pending, first_prefix_len) {
+                Some((next, _)) => next,
+                // The batch boundary proves this last NAL ended here.
+                None if end_of_batch && self.pending.len() > first_prefix_len => self.pending.len(),
+                None => break,
             };
 
             let Some(&header) = self.pending.get(first_prefix_len) else {
@@ -1028,7 +1038,7 @@ mod tests {
         // Deliberately split start codes and NAL payloads across arbitrary
         // chunks, as the Tello UDP stream does.
         for chunk in bytes.chunks(257) {
-            units.extend(assembler.push(chunk, true));
+            units.extend(assembler.push(chunk, true, false));
         }
 
         assert!(units.len() > 2, "sample must reframe into several pictures");
@@ -1053,6 +1063,35 @@ mod tests {
             callbacks > 0,
             "a detector starting after stream attachment must receive pixels"
         );
+    }
+
+    #[test]
+    fn a_batch_boundary_releases_the_picture_it_ends_on() {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample.h264");
+        let bytes = fs::read(&sample).expect("checked-in sample.h264 must be readable");
+        let units = sample_access_units(&bytes);
+
+        // One picture per push, exactly as video.rs delivers them. Without the
+        // boundary the detector sees each picture only once the NEXT one
+        // arrives - a whole frame of lag on every observation it reports.
+        let mut assembler = H264AccessUnitAssembler::new();
+        let emitted = assembler.push(units[0], true, true);
+        assert_eq!(emitted.len(), 1, "the picture must come out with its batch");
+        assert!(is_decoder_seed(&emitted[0]));
+
+        let mut without = H264AccessUnitAssembler::new();
+        assert!(
+            without.push(units[0], true, false).is_empty(),
+            "without the boundary the same bytes wait for the next start code"
+        );
+
+        // And what came out still decodes.
+        let mut decoder = H264Decoder::new().expect("FFmpeg H.264 decoder must initialize");
+        let mut frames = 0usize;
+        decoder
+            .decode_into(&emitted[0], true, |_, _, _| frames += 1)
+            .expect("a batch-released picture must decode");
+        assert_eq!(frames, 1);
     }
 
     #[test]

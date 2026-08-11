@@ -122,6 +122,20 @@ export function splitAnnexBNals(pending: Uint8Array, chunk: Uint8Array): { nals:
   }
 }
 
+/**
+ * The bytes a transport batch ended on, as a complete NAL - or null when they
+ * are not one (no start code yet, or nothing after it). Split out from
+ * `splitAnnexBNals` because it makes the opposite assumption: that assumption
+ * is the caller's to make, and only a caller whose transport delimits frames
+ * may make it.
+ */
+export function nalFromBatchTail(pending: Uint8Array): AnnexBNal | null {
+  const codeLen = startCodeLengthAt(pending, 0);
+  if (codeLen === 0) return null;
+  const data = pending.slice(codeLen);
+  return data.length > 0 ? { type: nalUnitType(data[0]!), data } : null;
+}
+
 /** 4-byte Annex-B start code, used when re-framing NALs for the decoder. */
 const START_CODE = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
 
@@ -244,20 +258,36 @@ export class H264Stream {
     return this.lastDecodeMs;
   }
 
-  /** Feeds one newly arrived chunk of raw bytes (e.g. one WS binary frame's
+  /** Feeds one newly arrived chunk of raw bytes (e.g. one Tauri frame's
    * payload). Safe to call at any chunking granularity.
    *
    * `timestampUs` labels the access units this chunk completes; it comes back
    * on `frame.timestamp`. Any monotonically increasing microsecond value
    * works - a receive-time epoch stamp turns that field into an exact
    * end-to-end latency reference. Omit it and the stream numbers frames
-   * itself at a nominal interval. */
-  push(chunk: Uint8Array, timestampUs?: number): void {
+   * itself at a nominal interval.
+   *
+   * `endOfBatch` says this chunk ends on a NAL boundary, which is worth a
+   * whole frame of latency: Annex-B has no length prefix, so a NAL is
+   * normally only known to be complete once the NEXT start code arrives - and
+   * the Tello sends one slice per picture, so picture N would sit in `pending`
+   * until picture N+1 landed ~33 ms later. Worse, it would then be stamped
+   * with N+1's arrival, hiding the wait from every measurement. The Rust
+   * receiver already delimits its frames on the drone's own short datagram,
+   * so the caller on that path knows the boundary and says so. */
+  push(chunk: Uint8Array, timestampUs?: number, endOfBatch = false): void {
     try {
       this.chunkTimestampUs = timestampUs;
       const { nals, rest } = splitAnnexBNals(this.pending, chunk);
       this.pending = rest;
       for (const nal of nals) this.handleNal(nal);
+      if (endOfBatch) {
+        const tail = nalFromBatchTail(this.pending);
+        if (tail !== null) {
+          this.pending = new Uint8Array(0);
+          this.handleNal(tail);
+        }
+      }
     } catch (err) {
       this.reportError(err);
     } finally {

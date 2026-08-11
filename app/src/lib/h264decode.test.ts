@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { H264Stream, splitAnnexBNals, spsToCodecString, type AnnexBNal } from "./h264decode.ts";
+import { H264Stream, nalFromBatchTail, splitAnnexBNals, spsToCodecString, type AnnexBNal } from "./h264decode.ts";
 
 /**
  * Unit tests for the pure Annex-B NAL-unit splitter and SPS codec-string
@@ -263,5 +263,58 @@ describe("H264Stream decoder recovery", () => {
     } finally {
       codecs.restore();
     }
+  });
+});
+
+describe("end-of-batch flush", () => {
+  test("the NAL a batch ends on is complete, and its own arrival stamps it", () => {
+    const codecs = stubWebCodecs();
+    try {
+      const stream = new H264Stream({ onFrame: () => {}, onError: () => {} });
+
+      // Exactly the drone's shape: one picture per transport batch, and the
+      // slice is the last NAL in it. Without the boundary, picture N waits for
+      // picture N+1 to arrive - a whole frame of latency, and then N is
+      // stamped with N+1's arrival so no measurement can see the wait.
+      stream.push(new Uint8Array(accessUnit(true)), 1_000, true);
+      stream.push(new Uint8Array(accessUnit(false)), 34_000, true);
+
+      const chunks = codecs.built[0]?.chunks ?? [];
+      expect(chunks.length).toBe(2);
+      expect(chunks[0]?.type).toBe("key");
+      expect(chunks[0]?.timestamp).toBe(1_000);
+      expect(chunks[1]?.type).toBe("delta");
+      expect(chunks[1]?.timestamp).toBe(34_000);
+    } finally {
+      codecs.restore();
+    }
+  });
+
+  test("without the boundary a trailing slice still waits for the next start code", () => {
+    const codecs = stubWebCodecs();
+    try {
+      const stream = new H264Stream({ onFrame: () => {}, onError: () => {} });
+      stream.push(new Uint8Array(accessUnit(true)), 1_000);
+      // The IDR is the batch's last NAL, so nothing is decodable yet.
+      expect(codecs.built.length).toBe(0);
+    } finally {
+      codecs.restore();
+    }
+  });
+});
+
+describe("nalFromBatchTail", () => {
+  test("reads the NAL type and strips either start code", () => {
+    expect(nalFromBatchTail(new Uint8Array([...SC4, nalHeader(5), 0x11]))?.type).toBe(5);
+    expect(nalFromBatchTail(new Uint8Array([...SC3, nalHeader(1), 0x11]))?.type).toBe(1);
+  });
+
+  test("refuses anything that is not a whole NAL", () => {
+    // A partial start code, a start code with no payload, and stream garbage:
+    // handing any of these to a decoder is worse than waiting.
+    expect(nalFromBatchTail(new Uint8Array([0x00, 0x00]))).toBeNull();
+    expect(nalFromBatchTail(new Uint8Array(SC4))).toBeNull();
+    expect(nalFromBatchTail(new Uint8Array([0xaa, 0xbb]))).toBeNull();
+    expect(nalFromBatchTail(new Uint8Array(0))).toBeNull();
   });
 });

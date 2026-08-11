@@ -254,7 +254,9 @@ impl VisionWorker {
                 .access_units
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let access_units = reassembler.push(raw, active != VisionMode::Key);
+            // `raw` is one transport batch from video.rs, delimited on the
+            // drone's own short datagram, so it ends on a NAL boundary.
+            let access_units = reassembler.push(raw, active != VisionMode::Key, true);
             let decoder_seed = needs_decoder_seed
                 .then(|| reassembler.decoder_seed())
                 .flatten();
