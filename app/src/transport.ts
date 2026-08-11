@@ -731,9 +731,11 @@ export async function updateCheck(): Promise<AvailableUpdate | null> {
 }
 
 /** Downloads, verifies and installs, then quits so the installer can replace
- *  this binary and start the new one. Never returns on success. */
-export async function updateApply(update: AvailableUpdate): Promise<void> {
-  await invoke("update_apply", { update });
+ *  this binary and start the new one. Never returns on success - except under
+ *  `AIDRONE_UPDATE_DRY_RUN=1`, where it returns where the verified artifact
+ *  was staged and installs nothing. */
+export async function updateApply(update: AvailableUpdate): Promise<string | null> {
+  return await invoke<string | null>("update_apply", { update });
 }
 
 export function onFrame(cb: (data: Uint8Array, recvEpochUs: number) => void): () => void {

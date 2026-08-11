@@ -517,10 +517,14 @@ async function applyUpdate(): Promise<void> {
   paintLanding();
   landing.log(`[update] ${pendingUpdate.asset} 내려받는 중 (${Math.round(pendingUpdate.size / 1e6)} MB)`);
   try {
-    await updateApply(pendingUpdate);
-    // Rust exits the process on success, so reaching here means the handoff
-    // returned without replacing anything.
-    landing.log("[update] 설치 프로그램에 넘겼습니다 · 곧 재시작됩니다");
+    const staged = await updateApply(pendingUpdate);
+    // Rust exits the process on success, so reaching here means either the
+    // handoff returned without replacing anything, or this is a dry run.
+    landing.log(
+      staged === null
+        ? "[update] 설치 프로그램에 넘겼습니다 · 곧 재시작됩니다"
+        : `[update] 검증 완료 (설치는 건너뜀) · ${staged}`,
+    );
   } catch (err) {
     updateApplying = false;
     updateError = errText(err);

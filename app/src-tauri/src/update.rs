@@ -346,24 +346,75 @@ fn install(installer: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// How this process can become root to run `apt-get`. Ordered by how little it
+/// asks of the operator.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Elevation {
+    /// Already root - a headless or packaged-service run.
+    None,
+    /// Passwordless sudo, which a developer box often has and a desktop rarely.
+    Sudo,
+    /// The desktop's own authentication dialog.
+    Pkexec,
+}
+
+#[cfg(target_os = "linux")]
+fn elevation(effective_uid: u32, sudo_without_password: bool, has_pkexec: bool) -> Option<Elevation> {
+    if effective_uid == 0 {
+        return Some(Elevation::None);
+    }
+    if sudo_without_password {
+        return Some(Elevation::Sudo);
+    }
+    has_pkexec.then_some(Elevation::Pkexec)
+}
+
+/// The effective uid, read out of `/proc/self/status` rather than through a
+/// libc binding this crate would otherwise not need.
+#[cfg(target_os = "linux")]
+fn effective_uid_from(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|value| value.split_whitespace().nth(1).map(str::to_owned))
+        .and_then(|uid| uid.parse().ok())
+}
+
 #[cfg(target_os = "linux")]
 fn install(package: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| format!("locate this app: {error}"))?;
+
+    let effective_uid = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .as_deref()
+        .and_then(effective_uid_from)
+        .unwrap_or(u32::MAX);
+    let sudo_without_password = std::process::Command::new("sudo")
+        .args(["-n", "true"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+
     // `apt-get install` on a local .deb pulls any new dependency with it, which
-    // a bare `dpkg -i` would leave unconfigured. pkexec raises the desktop's own
-    // authentication dialog; without it there is no way to become root from a
-    // GUI session, and saying so is better than failing silently.
-    if which("pkexec").is_none() {
-        return Err(format!(
-            "pkexec is not installed - run: sudo apt install {}",
-            package.display()
-        ));
-    }
+    // a bare `dpkg -i` would leave unconfigured.
+    let command = match elevation(effective_uid, sudo_without_password, which("pkexec").is_some()) {
+        Some(Elevation::None) => "apt-get".to_owned(),
+        Some(Elevation::Sudo) => "sudo -n apt-get".to_owned(),
+        Some(Elevation::Pkexec) => "pkexec apt-get".to_owned(),
+        None => {
+            return Err(format!(
+                "no way to become root from here - run: sudo apt install {}",
+                package.display()
+            ))
+        }
+    };
+
     let script = std::env::temp_dir().join("aidrone-update.sh");
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\npkexec apt-get install -y --allow-downgrades '{}'\nexec '{}'\n",
+            "#!/bin/sh\n{command} install -y --allow-downgrades '{}'\nexec '{}'\n",
             package.display(),
             exe.display()
         ),
@@ -388,11 +439,18 @@ fn which(program: &str) -> Option<PathBuf> {
 /// Downloads, verifies, installs and relaunches. The window is gone by the time
 /// the installer runs, so the caller must have nothing in flight - the UI only
 /// offers this from the landing screen, never during a session.
+///
+/// `AIDRONE_UPDATE_DRY_RUN=1` stops after the checksum and returns where the
+/// artifact landed. It exists because the install step is the one part that
+/// cannot be exercised unattended: a per-machine NSIS installer raises UAC on
+/// Windows' secure desktop, which no automation may touch. Everything before
+/// it - the release query, the platform pick, the download, the digest - is
+/// then testable on both platforms.
 #[tauri::command]
 pub(crate) async fn update_apply(
     app: tauri::AppHandle,
     update: AvailableUpdateInput,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let update = AvailableUpdate {
         version: update.version,
         tag: update.tag,
@@ -406,11 +464,15 @@ pub(crate) async fn update_apply(
     }
 
     let staged = download_verified(&update).await?;
+    if std::env::var("AIDRONE_UPDATE_DRY_RUN").is_ok_and(|value| value == "1") {
+        return Ok(Some(staged.display().to_string()));
+    }
+
     install(&staged)?;
     // Give the helper a moment to start before this process disappears.
     tokio::time::sleep(Duration::from_millis(250)).await;
     app.exit(0);
-    Ok(())
+    Ok(None)
 }
 
 /// The same shape coming back from the WebView. Deserialized separately so the
@@ -504,6 +566,31 @@ mod tests {
             "no artifact for this release means no update, not the nearest one"
         );
         assert!(asset_for_platform(&assets, None).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_needs_no_prompt_and_a_desktop_gets_one() {
+        assert_eq!(elevation(0, false, false), Some(Elevation::None));
+        // Passwordless sudo beats a dialog nobody is sitting in front of.
+        assert_eq!(elevation(1000, true, true), Some(Elevation::Sudo));
+        assert_eq!(elevation(1000, false, true), Some(Elevation::Pkexec));
+        // Neither: say so instead of writing a script that cannot work.
+        assert_eq!(elevation(1000, false, false), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_effective_uid_comes_from_proc_status() {
+        let status = "Name:\tapp\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(effective_uid_from(status), Some(1000));
+        // Field two is the EFFECTIVE uid: a setuid binary differs here, and
+        // reading the real one would ask for a password it does not need.
+        assert_eq!(
+            effective_uid_from("Uid:\t1000\t0\t0\t0\n"),
+            Some(0)
+        );
+        assert_eq!(effective_uid_from("Name:\tapp\n"), None);
     }
 
     #[test]
