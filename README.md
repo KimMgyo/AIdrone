@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.15_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.16_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -257,6 +257,25 @@ artifact landed. It exists because the install step is the one part that cannot
 run unattended: UAC lives on Windows' secure desktop, which no automation may
 touch.
 
+**Two things the end-to-end test caught that no unit test would have.** Both
+were found by installing an old build, clicking the button, and watching:
+
+1. **`GET /releases` is not newest-first.** Page one of this repository came
+   back `0.1.2`, `0.1.11`, `0.1.8` - tag order, and the tag is a commit SHA, so
+   effectively arbitrary. Taking the first newer entry offered a build from
+   hours earlier and missed the current one. It now takes the **highest**
+   version any release offers, over a 40-release page.
+2. **The installer has to leave this app's process group.** A plain child dies
+   with whatever supervises the app: the script was written, the app exited,
+   and `apt` never ran. `setsid` on Linux and `DETACHED_PROCESS` on Windows are
+   what make the handoff survive the process it replaces.
+
+Verified end to end on Ubuntu 26.04: 0.1.14 offered 0.1.15, downloaded 87 MB,
+matched the digest, `apt-get install` ran, and the new build came back up - 40
+seconds from click to a running 0.1.15. On Windows the same path was verified
+through the checksum with `AIDRONE_UPDATE_DRY_RUN=1` (123 MB, staged, install
+skipped); the UAC step itself is the one thing a person still has to click.
+
 ### Doing it by hand
 
 Only needed when running from a source build rather than an installed package.
@@ -287,8 +306,8 @@ subnet once a second and prints anything that answers.
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.15_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.15_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.16_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.16_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -341,7 +360,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.15_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.16_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:
