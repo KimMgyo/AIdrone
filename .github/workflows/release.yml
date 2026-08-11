@@ -170,3 +170,24 @@ jobs:
           make_latest: false
           files: release-assets/**/*
           fail_on_unmatched_files: true
+
+      - name: Remove unsupported AppImage assets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const assets = releases.flatMap((release) =>
+              release.assets.filter((asset) => asset.name.endsWith(".AppImage")),
+            );
+            for (const asset of assets) {
+              core.info(`Deleting unsupported release asset ${asset.name} (${asset.id})`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id,
+              });
+            }
