@@ -15,6 +15,25 @@ use aruco_rs::core::dictionary::DICTIONARY_ARUCO_MIP_36H12;
 
 pub const FAMILY_NAME: &str = "ARUCO_MIP_36h12";
 
+/// The dictionary's payload bits, one entry per id, for drawing the markers.
+///
+/// Row-major 6x6 exactly as `aruco-rs` stores it - bit 35 is the top-left
+/// payload cell, walking rows - which is the order a renderer wants and the
+/// opposite of the perimeter-first order the AprilTag family needs. The
+/// panel's marker library draws from this so the glyph an operator clicks is
+/// generated from the same list the detector decodes, never a second table.
+pub fn payload_codes() -> Result<Vec<u64>, String> {
+    let config = &DICTIONARY_ARUCO_MIP_36H12;
+    if config.n_bits != 36 || config.code_list.len() != 250 {
+        return Err(format!(
+            "unexpected {FAMILY_NAME} dictionary shape: {} bits, {} codes",
+            config.n_bits,
+            config.code_list.len()
+        ));
+    }
+    Ok(config.code_list.to_vec())
+}
+
 /// AprilTag's fast decode table is deliberately capped at two corrected bits.
 /// The emitted Hamming value stays visible to the A/B surface; it is not used
 /// to issue a command or to retain a past detection.

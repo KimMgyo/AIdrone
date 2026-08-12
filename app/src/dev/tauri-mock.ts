@@ -291,6 +291,20 @@ const handlers: Record<string, Handler> = {
     node: "192.168.4.1",
   }),
 
+  // Real MIP payload bits would need the 250-entry table in here; the library
+  // only has to be clickable and visibly distinct to judge a layout, so the
+  // mock generates deterministic 36-bit patterns instead. Anything that
+  // depends on a code being the RIGHT one belongs against the real binary.
+  marker_codes: () =>
+    Array.from({ length: 250 }, (_, id) => {
+      let bits = 0;
+      for (let cell = 0; cell < 36; cell++) {
+        const on = (((id + 1) * (cell + 7)) ^ (id << 2)) % 3 !== 0;
+        bits = bits * 2 + (on ? 1 : 0);
+      }
+      return bits;
+    }),
+
   preflight: () => [
     { id: "command", label: "명령 소켓", detail: "udp/8889 · ok (mock)", ok: true },
     { id: "state", label: "상태 스트림", detail: "udp/8890 · 10 Hz (mock)", ok: true },

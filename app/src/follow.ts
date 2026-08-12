@@ -307,8 +307,10 @@ export type FollowState = Readonly<{
   airborne: boolean | null;
 }>;
 
-export type FollowStopReason = "mode" | "session" | "emergency";
-export type FollowReason = FollowStopReason | "locked" | "released";
+/** `paused` is the operator's own hand on the box, and is the only halt they
+ *  can undo without releasing the lock. */
+export type FollowStopReason = "mode" | "session" | "emergency" | "paused";
+export type FollowReason = FollowStopReason | "locked" | "released" | "resumed";
 
 export type FollowListener = (state: FollowState, reason: FollowReason | null) => void;
 
@@ -320,13 +322,20 @@ export interface FollowDeps {
 }
 
 /**
- * What a panel may do: read and watch. Nothing here changes how the loop
- * flies - the power ceiling and both setpoints are fixed, so the card is a
- * readout, not a cockpit.
+ * What a panel may do: read, watch, and pause or resume the loop it is showing.
+ *
+ * Not `update` - the observation half belongs to the composition root, so a
+ * panel can never tell the loop what it is looking at. And `stop` is narrowed
+ * to `"paused"` here, so the only halt a panel can cause is the one it can
+ * also undo; emergency and mode changes stay with the caller that owns them.
+ * The power ceiling and both setpoints remain fixed - there is still no
+ * cockpit here, only a switch.
  */
 export interface FollowPort {
   state(): FollowState;
   subscribe(listener: FollowListener): () => void;
+  stop(reason: "paused"): void;
+  resume(): void;
 }
 
 export interface FollowController extends FollowPort {
@@ -337,8 +346,19 @@ export interface FollowController extends FollowPort {
   update(locked: boolean, target: FollowTarget | null, desiredSize: number): void;
   /** From the drone's own state datagram. Display only, never a gate. */
   setAirborne(airborne: boolean | null): void;
-  /** Emergency, mode change, teardown. Halts until the lock is released. */
+  /** Emergency, mode change, teardown, or the operator pausing. Halts until
+   *  the lock is released, or until `resume()` for a pause they can undo. */
   stop(reason: FollowStopReason): void;
+  /**
+   * Puts a halted loop back to work on the lock it still holds.
+   *
+   * Deliberately not restricted to pauses. A halt is a halt however it was
+   * reached, and an operator looking at 중단됨 with a target still locked has
+   * exactly one thing they want. The dangerous halts cannot be resumed by
+   * accident anyway: an emergency stop and a mode change both drop the lock or
+   * the mode this loop needs, and a released lock clears the halt outright.
+   */
+  resume(): void;
 }
 
 export function createFollowController(deps: FollowDeps, config: FollowConfig = FOLLOW_DEFAULTS): FollowController {
@@ -483,6 +503,21 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
       stopLoop();
       forceNeutral();
       announce(reason);
+    },
+
+    resume(): void {
+      if (!locked || !halted) return;
+      halted = false;
+      // The lock never went away, but the target's last sighting may have
+      // aged out while the loop was stopped. `tick()` decides which of those
+      // it is - following or searching - from the same staleness rule the
+      // running loop uses, so a resume cannot start by flying at a target
+      // nobody has seen for a minute.
+      if (loop === 0) loop = start(tick, RC_SEND_INTERVAL_MS);
+      // Announced after the tick, not before: `tick` announces its own state
+      // with a null reason, which would swallow this one on the way past.
+      tick();
+      announce("resumed");
     },
 
     setAirborne(next): void {

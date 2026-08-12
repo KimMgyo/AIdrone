@@ -5,6 +5,7 @@ import {
   type NativeVisionAdapter,
 } from "../lib/aruco.ts";
 import type { FollowPort } from "../follow.ts";
+import { markerCodes } from "../transport.ts";
 import { markerTargetPx, parseMarkerSize, type MarkerSizes } from "../marker-size.ts";
 import { installTargetBox } from "./target-box.ts";
 import { cls, must, text } from "../ui.ts";
@@ -19,13 +20,17 @@ export interface ArucoPanel {
   dispose(): void;
 }
 
-/** A state word, not a sentence: the empty list is a reading like any other. */
-function emptyMarkerNote(state: ArucoVisionState): string | null {
+/**
+ * A state word, not a sentence. The roster is empty when nothing has been seen
+ * and nothing has been picked from the library, which is a different reading
+ * from a detector that is not running.
+ */
+function emptyRosterNote(state: ArucoVisionState): string | null {
   if (!state.active) return "비활성";
-  if (state.recvEpochUs === null) return "결과 대기";
   if (state.observation?.state === "error") return "AprilTag 3 오류";
-  if (state.markers.length === 0) return "감지 없음";
-  return null;
+  if (state.known.length > 0) return null;
+  if (state.recvEpochUs === null) return "결과 대기";
+  return "감지 없음 · 아래에서 마커를 골라 추가할 수 있습니다";
 }
 
 type MarkerRow = {
@@ -67,17 +72,17 @@ function reconcileMarkerRows(
   state: ArucoVisionState,
   sizes: MarkerSizes,
 ): void {
-  const message = emptyMarkerNote(state);
+  const message = emptyRosterNote(state);
   note.hidden = message === null;
   if (message !== null) text(note, message);
 
   const seen = new Set<number>();
-  for (const marker of message === null ? state.markers : []) {
-    if (seen.has(marker.id)) continue;
-    seen.add(marker.id);
-    let row = rows.get(marker.id);
+  for (const entry of state.known) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    let row = rows.get(entry.id);
     if (row === undefined) {
-      const id = marker.id;
+      const id = entry.id;
       const root = document.createElement("div");
       root.className = "flex items-stretch gap-[7px]";
       // The size field is `type="text"`: a number field hands back an empty
@@ -96,9 +101,12 @@ function reconcileMarkerRows(
           <input data-k="size" type="text" inputmode="decimal" autocomplete="off" spellcheck="false"
             class="w-[40px] min-w-0 border-none bg-transparent text-right font-mono text-[11px] text-ink outline-none" />
           <span class="font-mono text-[9.5px] text-dim2">cm</span>
-        </label>`;
+        </label>
+        <button data-k="forget" type="button" title="목록에서 제거"
+          class="w-[24px] flex-none rounded-[3px] border border-line2 bg-sunken font-mono text-[12px] text-dim2 cursor-pointer hover:border-alert/45 hover:text-alert2">×</button>`;
       const button = must("[data-k=select]", HTMLButtonElement, root);
       button.dataset.targetId = String(id);
+      must("[data-k=forget]", HTMLButtonElement, root).dataset.forgetId = String(id);
       const size = must("[data-k=size]", HTMLInputElement, root);
       size.setAttribute("aria-label", `ID ${id} 마커 한 변 길이 (cm)`);
       const created: MarkerRow = {
@@ -131,9 +139,9 @@ function reconcileMarkerRows(
       list.append(root);
     }
 
-    const metrics = markerMetrics(marker);
-    const selected = marker.id === state.target.id;
-    const sizeCm = sizes.get(marker.id);
+    const marker = entry.marker;
+    const selected = entry.id === state.target.id;
+    const sizeCm = sizes.get(entry.id);
     // No measurement, no selection. The follow loop steers on apparent size,
     // so an unmeasured tag would be held at a distance nobody chose - and the
     // failure mode of guessing too small is flying too close.
@@ -155,9 +163,17 @@ function reconcileMarkerRows(
         !followable ? "border-line3 text-dim2" : selected ? "border-warn/65 text-warn" : "border-line4 text-ink2"
       }`,
     );
-    text(row.chip, String(marker.id));
-    text(row.title, `ID ${marker.id}`);
-    const facts = `H ${marker.hammingDistance} · ${Math.round(metrics.area)} px² · (${Math.round(metrics.centerX)}, ${Math.round(metrics.centerY)})`;
+    text(row.chip, String(entry.id));
+    text(row.title, `ID ${entry.id}`);
+    // A row on the roster but not in this frame has no geometry to print, and
+    // printing the last frame's would be a position the drone is not seeing.
+    const facts =
+      marker === null
+        ? "화면에 없음"
+        : (() => {
+            const metrics = markerMetrics(marker);
+            return `H ${marker.hammingDistance} · ${Math.round(metrics.area)} px² · (${Math.round(metrics.centerX)}, ${Math.round(metrics.centerY)})`;
+          })();
     // No "measure this first" hint: the size box sits at the end of this very
     // row, and an empty one says it without spending a line saying it.
     text(row.facts, sizeCm === null ? facts : `${facts} · ${sizeCm} cm → ${Math.round(markerTargetPx(sizeCm))} px`);
@@ -208,23 +224,113 @@ function arucoTrouble(state: ArucoVisionState): string | null {
   return null;
 }
 
+function readId(encoded: string | undefined): number | null {
+  if (encoded === undefined) return null;
+  const id = Number(encoded);
+  return Number.isSafeInteger(id) && id >= 0 ? id : null;
+}
+
+/** Payload cells across one marker, and the quiet black border around them. */
+const MIP_CELLS = 6;
+const MARKER_CELLS = MIP_CELLS + 2;
+
+/**
+ * Draws one dictionary id at `cell` device pixels per marker cell.
+ *
+ * The code is row-major with bit 35 at the top-left payload cell, which is how
+ * `aruco-rs` stores it and what `apriltag3.rs` repacks away from. A set bit is
+ * white; the border is always black. Drawing from the same list the detector
+ * decodes is the point - a second hand-drawn table would be free to disagree
+ * with the thing the drone is actually looking for.
+ */
+function drawMarker(canvas: HTMLCanvasElement, code: number, cell: number): void {
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) return;
+  const size = MARKER_CELLS * cell;
+  canvas.width = size;
+  canvas.height = size;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = "#fff";
+  for (let row = 0; row < MIP_CELLS; row++) {
+    for (let column = 0; column < MIP_CELLS; column++) {
+      const bit = row * MIP_CELLS + column;
+      // `2 ** n`, not `1 << n`: the shift operators coerce to int32 and this
+      // code is 36 bits, so bit 35 would come back negative and bits above 31
+      // would vanish entirely.
+      if (Math.floor(code / 2 ** (35 - bit)) % 2 === 1) {
+        ctx.fillRect((column + 1) * cell, (row + 1) * cell, cell, cell);
+      }
+    }
+  }
+}
+
+/** One-time render of all 250 ids. Built once per panel, not per observation. */
+function buildLibrary(library: HTMLDivElement, codes: readonly number[]): void {
+  const fragment = document.createDocumentFragment();
+  for (const [id, code] of codes.entries()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.libraryId = String(id);
+    button.title = `ID ${id} 추가`;
+    button.className = LIBRARY_TILE;
+    const canvas = document.createElement("canvas");
+    canvas.className = "w-full";
+    canvas.style.imageRendering = "pixelated";
+    drawMarker(canvas, code, 3);
+    const label = document.createElement("div");
+    label.className = "font-mono text-[8px] leading-none text-dim2";
+    label.textContent = String(id);
+    button.append(canvas, label);
+    fragment.append(button);
+  }
+  library.replaceChildren(fragment);
+}
+
+const LIBRARY_TILE =
+  "flex flex-col items-center gap-[2px] rounded-[2px] border border-line2 bg-sunken p-[3px] cursor-pointer hover:border-line4";
+
+/** The library's only per-frame work: which tiles are already on the roster. */
+function paintLibrarySelection(library: HTMLDivElement, state: ArucoVisionState): void {
+  const known = new Set(state.known.map((entry) => entry.id));
+  for (const tile of library.children) {
+    if (!(tile instanceof HTMLButtonElement)) continue;
+    const id = readId(tile.dataset.libraryId);
+    const on = id !== null && known.has(id);
+    cls(tile, `${LIBRARY_TILE} ${on ? "border-warn/60 bg-warn/10" : ""}`);
+  }
+}
+
 export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): ArucoPanel {
   mount.innerHTML = `
     <section class="flex h-full min-h-0 flex-col gap-[10px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="ArUco marker detector">
-      <!-- The same two sections as the person panel: who is being followed,
-           and what was seen. Nothing else - the A/B engine rows that used to
-           sit here went with the comparison engine they existed to show. -->
+      <!-- Three sections: who is being followed, the roster of markers that
+           can be, and the library to add one from. The roster is not called
+           DETECTED any more because it is no longer only what the camera can
+           see right now - a marker joins it by being detected OR by being
+           picked below, and stays until it is removed. -->
       <div data-k="target-mount"></div>
 
-      <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · <span data-k="count">0</span></div>
-      <div data-k="marker-note" class="font-mono text-[10.5px] text-dim2" hidden></div>
+      <div class="flex items-center justify-between">
+        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKERS · <span data-k="count">0</span></div>
+        <div class="font-mono text-[10px] text-dim3">화면 <span data-k="visible">0</span></div>
+      </div>
+      <div data-k="marker-note" class="font-mono text-[10.5px] leading-[1.6] text-dim2" hidden></div>
       <div data-k="marker-list" class="flex flex-col gap-[6px]"></div>
+
+      <div class="flex items-center justify-between border-t border-line2 pt-[9px]">
+        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKER LIBRARY</div>
+        <div class="font-mono text-[10px] text-dim3">${NATIVE_ARUCO_DICTIONARY}</div>
+      </div>
+      <div data-k="library" class="grid max-h-[190px] grid-cols-[repeat(auto-fill,minmax(38px,1fr))] gap-[5px] overflow-y-auto pr-[2px]"></div>
     </section>
   `;
 
   const count = must("[data-k=count]", HTMLSpanElement, mount);
+  const visible = must("[data-k=visible]", HTMLSpanElement, mount);
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
+  const library = must("[data-k=library]", HTMLDivElement, mount);
   const markerRowNodes = new Map<number, MarkerRow>();
 
   let current = deps.vision.arucoSnapshot();
@@ -245,19 +351,36 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
       locked: next.target.id !== null,
     });
 
-    text(count, String(next.markers.length));
+    text(count, String(next.known.length));
+    text(visible, String(next.markers.length));
     reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes);
+    paintLibrarySelection(library, next);
   };
 
   const onClick = (event: MouseEvent): void => {
-    // The clear button lives inside the target box and has its own handler;
-    // this only owns the marker rows.
+    // The release control lives inside the target box and has its own handler;
+    // this owns the roster rows and the library.
     const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("button") : null;
     if (button === null || !mount.contains(button)) return;
-    const encoded = button.dataset.targetId;
-    if (encoded === undefined) return;
-    const id = Number(encoded);
-    if (!Number.isSafeInteger(id) || id < 0 || !current.markers.some((marker) => marker.id === id)) return;
+
+    const forget = readId(button.dataset.forgetId);
+    if (forget !== null) {
+      deps.vision.forgetArucoMarker(forget);
+      return;
+    }
+
+    // The library adds a marker to the roster and selects it. It cannot arm
+    // the loop by itself: an unmeasured tag stays unfollowable, which the
+    // target box reports as 크기 필요 until a size is typed into its row.
+    const pick = readId(button.dataset.libraryId);
+    if (pick !== null) {
+      deps.vision.addArucoMarker(pick);
+      if (deps.sizes.get(pick) !== null) deps.vision.setArucoTarget(pick);
+      return;
+    }
+
+    const id = readId(button.dataset.targetId);
+    if (id === null || !current.known.some((entry) => entry.id === id)) return;
     // Refused here as well as disabled in the markup, because a disabled
     // button is a rendering detail and this is the safety rule.
     if (deps.sizes.get(id) === null) return;
@@ -269,6 +392,17 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const unsubscribeSizes = deps.sizes.subscribe(() => {
     paint(current);
   });
+  // The codebook is constant for the life of the build, so this is asked once
+  // and the glyphs are drawn once. A failure leaves the library empty rather
+  // than the panel broken - every other way of choosing a marker still works.
+  void markerCodes()
+    .then((codes) => {
+      buildLibrary(library, codes);
+      paintLibrarySelection(library, current);
+    })
+    .catch(() => {
+      text(library, "");
+    });
 
   return {
     dispose(): void {

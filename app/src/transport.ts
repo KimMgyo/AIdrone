@@ -712,6 +712,15 @@ export async function updateCheck(): Promise<AvailableUpdate | null> {
   return await invoke<AvailableUpdate | null>("update_check");
 }
 
+/**
+ * The marker dictionary's 250 payload codes, row-major 6x6 per id. Constant
+ * for the life of the build, so a caller asks once; the panel's marker library
+ * draws its glyphs from this rather than from a second copy of the table.
+ */
+export async function markerCodes(): Promise<readonly number[]> {
+  return await invoke<number[]>("marker_codes");
+}
+
 /** Downloads, verifies and installs, then quits so the installer can replace
  *  this binary and start the new one. Never returns on success - except under
  *  `AIDRONE_UPDATE_DRY_RUN=1`, where it returns where the verified artifact

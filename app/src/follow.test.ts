@@ -255,6 +255,50 @@ describe("createFollowController", () => {
     expect(h.lastReason()).toBe("mode");
   });
 
+  test("a pause centres the sticks and resume puts the same lock back to work", () => {
+    const h = harness();
+    h.controller.update(true, at(860, 100), 150);
+    h.sent.length = 0;
+
+    h.controller.stop("paused");
+    expect(h.sent).toEqual(["rc 0 0 0 0"]);
+    expect(h.controller.state().phase).toBe("halted");
+    expect(h.running()).toBe(false);
+    expect(h.lastReason()).toBe("paused");
+
+    // A pause holds against the observation stream exactly like any other
+    // halt: frames keep arriving with the lock intact and none may restart it.
+    for (let i = 0; i < 5; i++) {
+      h.controller.update(true, at(860, 100), 150);
+      h.advance(100);
+      h.pump();
+    }
+    expect(h.sent).toEqual(["rc 0 0 0 0"]);
+
+    // Unlike an emergency stop, this one the operator can undo without giving
+    // up the lock - and it starts flying again on the target it still holds.
+    h.controller.resume();
+    expect(h.controller.state().phase).toBe("following");
+    expect(h.running()).toBe(true);
+    expect(h.lastReason()).toBe("resumed");
+    expect(h.sent.length).toBeGreaterThan(1);
+  });
+
+  test("resume is a no-op with nothing halted and nothing locked", () => {
+    const h = harness();
+    h.controller.resume();
+    expect(h.controller.state().phase).toBe("idle");
+    expect(h.sent).toEqual([]);
+
+    // Running, not halted: resuming must not double-start the loop or put a
+    // second command on the wire for one tick.
+    h.controller.update(true, at(860, 100), 150);
+    const before = h.sent.length;
+    h.controller.resume();
+    expect(h.sent.length).toBe(before);
+    expect(h.controller.state().phase).toBe("following");
+  });
+
   test("the output ceiling is fixed and nothing in flight can raise it", () => {
     const h = harness();
     // The real app re-observes every frame; without that the loop correctly

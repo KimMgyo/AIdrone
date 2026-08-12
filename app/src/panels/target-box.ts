@@ -66,6 +66,16 @@ const LABEL: Record<FollowPhase, string> = {
 };
 
 /**
+ * The box IS the switch. Clicking it pauses a running follow and resumes a
+ * halted one, which is the control an operator reaches for while watching the
+ * picture rather than the panel. It is inert without a lock, because there is
+ * nothing to pause.
+ *
+ * `role="button"` on a div rather than a real `<button>`: the release control
+ * lives inside this box and nested buttons are invalid HTML. The keyboard
+ * affordance is therefore explicit - Enter and Space, and a `tabindex` the
+ * paint keeps in step with whether the box does anything.
+ *
  * `clear` is optional because only the marker panel has anything to clear: a
  * person target is whoever is nearest, so there is no lock to release and a
  * button offering to would do nothing.
@@ -77,7 +87,7 @@ export function installTargetBox(
   clear?: () => void,
 ): TargetBox {
   mount.innerHTML = `
-    <div data-k="box" class="${IDLE_BOX[accent]}">
+    <div data-k="box" role="button" aria-label="추적 정지 / 재개" class="${IDLE_BOX[accent]}">
       <div class="flex items-center justify-between gap-[8px]">
         <div class="flex min-w-0 items-center gap-[7px]">
           <div data-k="dot" class="${DOT} bg-dim3"></div>
@@ -94,6 +104,7 @@ export function installTargetBox(
       <div data-k="distance" class="${ROW}">폭 --</div>
       <div data-k="power" class="${ROW}">POWER --</div>
       <div data-k="engine" class="${ROW} text-dim3"></div>
+      <div data-k="hint" class="mt-[6px] font-mono text-[9.5px] text-dim3" hidden></div>
     </div>
   `;
 
@@ -106,8 +117,31 @@ export function installTargetBox(
   const power = must("[data-k=power]", HTMLDivElement, mount);
   const engine = must("[data-k=engine]", HTMLDivElement, mount);
   const clearBtn = must("[data-k=clear]", HTMLButtonElement, mount);
+  const hint = must("[data-k=hint]", HTMLDivElement, mount);
 
-  if (clear !== undefined) clearBtn.addEventListener("click", clear);
+  // `stopPropagation`, not `preventDefault`: releasing the lock must not also
+  // read as a click on the box that contains the button.
+  if (clear !== undefined) {
+    clearBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      clear();
+    });
+  }
+
+  function toggle(): void {
+    if (!view.locked) return;
+    if (state.phase === "halted") follow.resume();
+    else follow.stop("paused");
+  }
+
+  box.addEventListener("click", toggle);
+  box.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    // Space scrolls a focused div otherwise, which moves the panel out from
+    // under the operator at the moment they meant to stop the drone.
+    event.preventDefault();
+    toggle();
+  });
 
   /** The panel's half, held so a follow update can repaint the whole box. */
   let view: TargetView = { title: "--", engine: "", trouble: null, locked: false };
@@ -180,6 +214,12 @@ export function installTargetBox(
     // number only means something next to the loop's own authority.
     text(power, `POWER ${state.maxRc} · 수동 ${DEFLECTION}`);
     clearBtn.hidden = clear === undefined || !view.locked;
+    // The affordance follows the capability exactly: a box that cannot pause
+    // anything is not focusable, has no pointer, and says nothing about it.
+    const armed = view.locked;
+    box.tabIndex = armed ? 0 : -1;
+    hint.hidden = !armed;
+    if (armed) text(hint, state.phase === "halted" ? "박스를 눌러 추적 재개" : "박스를 눌러 추적 정지");
   }
 
   const unsubscribe = follow.subscribe((next) => {

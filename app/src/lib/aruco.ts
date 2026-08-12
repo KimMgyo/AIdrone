@@ -57,6 +57,16 @@ export type ArucoTarget = Readonly<{
   state: ArucoTargetState;
 }>;
 
+/**
+ * One row of the panel's marker roster: an id this session knows about, with
+ * its current-frame observation when it has one. `marker: null` is the honest
+ * reading for a marker that is on the list but not in front of the camera.
+ */
+export type ArucoKnownMarker = Readonly<{
+  id: number;
+  marker: ArucoMarker | null;
+}>;
+
 export type ArucoVisionState = Readonly<{
   active: boolean;
   dictionaryName: typeof NATIVE_ARUCO_DICTIONARY;
@@ -64,6 +74,8 @@ export type ArucoVisionState = Readonly<{
   status: VisionStatusEvent | null;
   /** Current-frame markers, when the detector reported a healthy frame. */
   markers: readonly ArucoMarker[];
+  /** Every id this session knows about, seen or expected, in join order. */
+  known: readonly ArucoKnownMarker[];
   recvEpochUs: number | null;
   frameSize: Readonly<{ width: number; height: number }> | null;
   analysisMs: number | null;
@@ -113,6 +125,11 @@ export interface NativeVisionAdapter {
   accept(event: VisionEvent): void;
   /** Markers only. Person mode follows whoever is nearest, with no selection. */
   setArucoTarget(id: number | null): void;
+  /** Puts a marker on the roster before it has ever been seen, which is how the
+   *  panel's marker library turns a printed pattern into a tracking choice. */
+  addArucoMarker(id: number): void;
+  /** Takes one off, releasing it first if it was the target. */
+  forgetArucoMarker(id: number): void;
   arucoSnapshot(): ArucoVisionState;
   personSnapshot(): PersonVisionState;
   subscribeAruco(listener: ArucoStateListener): () => void;
@@ -144,6 +161,18 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
   private arucoEvent: VisionArucoEvent | null = null;
   private personEvent: VisionPersonEvent | null = null;
   private arucoTargetId: number | null = null;
+  /**
+   * Every marker id this session has either seen or been told to expect, in
+   * the order it joined. Sticky on purpose: a printed marker does not stop
+   * existing when it leaves frame, and a list that emptied itself every time
+   * the drone looked away could not be used to pick a target.
+   *
+   * Scoped to the session, not the mode: switching to keyboard and back must
+   * not lose the roster an operator built, but carrying "seen in the last
+   * flight" into a fresh one would be a claim about a scene this app has not
+   * looked at yet. Forgotten one at a time by `forgetArucoMarker`.
+   */
+  private arucoKnown: number[] = [];
   private readonly arucoListeners = new Set<ArucoStateListener>();
   private readonly personListeners = new Set<PersonStateListener>();
 
@@ -157,6 +186,7 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
   setSessionLive(live: boolean): void {
     if (live === this.sessionLive) return;
     this.sessionLive = live;
+    this.arucoKnown = [];
     this.clearObservations();
     this.notifyAll();
   }
@@ -181,6 +211,11 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
     if (event.kind === "aruco") {
       if (!this.active("aruco") || this.blocksResults(this.arucoStatus)) return;
       this.arucoEvent = event;
+      if (event.state === "ready") {
+        for (const marker of event.markers) {
+          if (!this.arucoKnown.includes(marker.id)) this.arucoKnown.push(marker.id);
+        }
+      }
       this.notifyAruco();
       return;
     }
@@ -192,12 +227,36 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
     this.notifyPerson();
   }
 
+  /**
+   * A target must be a marker this session knows about - seen at least once,
+   * or added from the marker library. It does NOT have to be in the current
+   * frame: that is what makes a lock survive the drone looking away, and what
+   * lets an operator choose the marker they are about to hold up.
+   *
+   * The size requirement is not relaxed with it. An unmeasured tag would be
+   * held at a distance nobody chose, so the panel refuses to arm one and the
+   * follow loop never receives it.
+   */
   setArucoTarget(id: number | null): void {
-    const event = this.arucoEvent;
-    const markers = event?.state === "ready" ? event.markers : [];
-    if (id !== null && !markers.some((marker) => marker.id === id)) return;
+    if (id !== null && !this.arucoKnown.includes(id)) return;
     if (id === this.arucoTargetId) return;
     this.arucoTargetId = id;
+    this.notifyAruco();
+  }
+
+  addArucoMarker(id: number): void {
+    if (this.arucoKnown.includes(id)) return;
+    this.arucoKnown.push(id);
+    this.notifyAruco();
+  }
+
+  forgetArucoMarker(id: number): void {
+    const at = this.arucoKnown.indexOf(id);
+    if (at < 0) return;
+    this.arucoKnown.splice(at, 1);
+    // Forgetting the marker being followed is a release: the loop may not keep
+    // steering at an id the operator has just taken off the list.
+    if (this.arucoTargetId === id) this.arucoTargetId = null;
     this.notifyAruco();
   }
 
@@ -211,6 +270,10 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
       dictionaryName: NATIVE_ARUCO_DICTIONARY,
       status: active ? this.arucoStatus : null,
       markers,
+      known: this.arucoKnown.map((id) => ({
+        id,
+        marker: markers.find((candidate) => candidate.id === id) ?? null,
+      })),
       recvEpochUs: active ? (event?.recvEpochUs ?? null) : null,
       frameSize: active && event !== null ? { width: event.width, height: event.height } : null,
       analysisMs: active && event?.state === "ready" ? event.analysisMs : null,

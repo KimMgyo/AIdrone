@@ -499,6 +499,14 @@ fn node_present() -> bool {
     }
 }
 
+/// The 250 payload codes of the marker dictionary, for the panel's marker
+/// library. Read-only and constant for the life of the build, so the frontend
+/// asks once at boot; 36 bits each fits a JSON number exactly.
+#[tauri::command]
+fn marker_codes() -> Result<Vec<u64>, String> {
+    crate::apriltag3::payload_codes()
+}
+
 /// How long one probe waits for its answer. A healthy Tello acks `command` in
 /// a few ms and state follows within one 10 Hz period, so this is slack for a
 /// link that is merely slow - and short enough that all three probes are done
@@ -723,6 +731,7 @@ pub fn run() {
             set_vision_mode,
             endpoints,
             node_present,
+            marker_codes,
             preflight,
             copilot::copilot_turn,
             speech::dictate_ready,

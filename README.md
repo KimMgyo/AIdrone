@@ -1114,7 +1114,7 @@ worse layout. It is safe only because `main.ts` paints both from the same
 over six consecutive samples, they never did. Any copy that cannot make that
 guarantee is a defect, not an exception.
 
-### Each vision panel is two sections, and one of them is a single box
+### Each vision panel is a target box and a list
 
 The panels had grown to three stacked boxes above the detection list: a
 detector status pill, a target row, and a follow card - three borders, three
@@ -1150,6 +1150,55 @@ Two things it collapsed rather than moved:
 The mode is called **마커 추적** rather than "ArUco 마커 추적". The dictionary
 is still named, once, on the engine line inside the box where it is evidence
 rather than a title.
+
+### The box is the switch, and the roster outlives the frame
+
+Two controls, both of which used to be missing:
+
+**Clicking the TARGET box pauses and resumes the follow.** It is the control
+an operator reaches for while watching the picture, not the panel, so it is
+the whole box rather than a button inside it - `role="button"` on a div,
+because the release control lives in the same box and nested buttons are
+invalid HTML, with Enter and Space wired explicitly and `preventDefault` on
+Space so the panel does not scroll out from under the hand that meant to stop
+a drone. The box is inert without a lock: `tabindex` goes to `-1`, the hint
+line disappears, and the click handler returns early. `FollowPort` grew
+exactly two verbs for this - `stop("paused")` and `resume()` - narrowed so a
+panel can only cause the halt it can also undo; emergency and mode changes
+stay with the caller that owns them.
+
+The `resume` notice needed one ordering fix that a test caught rather than a
+session did: `tick()` announces its own state with a null reason, so
+announcing `"resumed"` before it meant subscribers never saw the reason at
+all, and routing it with the stop reasons would have made the timeline read
+`자동 추적 정지 · 추적 재개`. It now announces after the tick and is handled
+beside `locked`, where it belongs.
+
+**The marker list is a roster, not a frame.** A printed marker does not stop
+existing when the drone looks away, so an id joins the list by being detected
+**or** by being picked from the library, stays until an `×` removes it, and
+shows `화면에 없음` in place of geometry while it is not in view. Forgetting
+the marker being followed releases it first - the loop may not keep steering
+at an id the operator has just taken off the list. The section is therefore
+called `MARKERS · n` with a `화면 n` count beside it rather than `DETECTED`:
+it is no longer only what the camera can see.
+
+**The marker library is 250 clickable glyphs**, drawn from the dictionary's
+own payload codes. `marker_codes()` returns the row-major 6x6 bits straight
+out of `DICTIONARY_ARUCO_MIP_36H12` - the same list `apriltag3.rs` repacks its
+family from - so the pattern an operator clicks is generated from the table
+the detector decodes, never a second hand-drawn one. The renderer uses
+`2 ** n` rather than `1 << n` deliberately: the shift operators coerce to
+int32, and a 36-bit code would lose every bit above 31 and read bit 35 as a
+sign.
+
+Picking from the library adds the marker and selects it, but **cannot arm the
+loop**. The size requirement is untouched: an unmeasured tag is held at a
+distance nobody chose, so the row stays disabled and the target box reads
+크기 필요 until a measurement is typed into it. What the library changed is
+only which markers may be chosen - `setArucoTarget` now requires an id on the
+roster instead of one in the current frame, which is also what lets a lock
+survive the target leaving view.
 
 ### Two input rows that did not survive a narrow window
 

@@ -100,6 +100,8 @@ const STOP_REASON: Record<FollowReason, string> = {
   mode: "모드 변경",
   session: "세션 종료",
   emergency: "비상 정지",
+  paused: "일시 정지",
+  resumed: "추적 재개",
 };
 
 const stationRoot = must("#station", HTMLDivElement);
@@ -174,9 +176,11 @@ follow.subscribe((state, reason) => {
   overlay.setFollow(state);
   if (renderer !== null) status = statusForMode(mode);
   if (reason === null) return;
-  if (reason === "locked") {
-    timeline.push("EXEC", `자동 추적 시작 · ${mode === "aruco" ? "ArUco 마커" : "사람"} 대상`);
-    consolePanel.push("info", "follow engaged by target lock");
+  // A resume is a start, not a stop. Routing it below would have the timeline
+  // read "자동 추적 정지 · 추적 재개", which is the opposite of what happened.
+  if (reason === "locked" || reason === "resumed") {
+    timeline.push("EXEC", `자동 추적 ${reason === "locked" ? "시작" : "재개"} · ${mode === "aruco" ? "ArUco 마커" : "사람"} 대상`);
+    consolePanel.push("info", reason === "locked" ? "follow engaged by target lock" : "follow resumed");
     return;
   }
   timeline.push("STOP", `자동 추적 정지 · ${STOP_REASON[reason]}`);
