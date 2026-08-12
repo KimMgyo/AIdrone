@@ -51,8 +51,7 @@ import { installPersonTracker } from "./panels/person.ts";
 import { installTelemetry } from "./panels/telemetry.ts";
 import { installTimeline } from "./panels/timeline.ts";
 import { VideoRenderer } from "./render.ts";
-import { installLanding } from "./screens/landing.ts";
-import { installStation, type StationModel } from "./screens/station.ts";
+import { installStation, type LinkView, type StationModel } from "./screens/station.ts";
 import {
   connect,
   disconnect,
@@ -69,7 +68,6 @@ import {
   setVisionMode,
   type DroneState,
   type Endpoints,
-  type Probe,
   type Telemetry,
   copilotTurn,
   updateApply,
@@ -103,7 +101,6 @@ const STOP_REASON: Record<FollowReason, string> = {
   emergency: "비상 정지",
 };
 
-const landingRoot = must("#landing", HTMLDivElement);
 const stationRoot = must("#station", HTMLDivElement);
 
 // --- session state ---------------------------------------------------------
@@ -111,8 +108,6 @@ const stationRoot = must("#station", HTMLDivElement);
 let renderer: VideoRenderer | null = null;
 let busy = false;
 let link: Endpoints | null = null;
-let probes: Probe[] | null = null;
-let probing = false;
 let lastTelemetry: Telemetry | null = null;
 let rxPktsPerSec: number | null = null;
 let prevPkts: number | null = null;
@@ -131,14 +126,8 @@ const appWindow = getCurrentWindow();
 
 // --- screens ---------------------------------------------------------------
 
-const landing = installLanding(landingRoot, {
-  onProbe: () => void runProbe(),
-  onConnect: () => void doConnect(),
-  onUpdate: () => void applyUpdate(),
-});
-
 const station = installStation(stationRoot, {
-  onDisconnect: () => void doDisconnect(),
+  onUpdate: () => void applyUpdate(),
   onEmergency: () => {
     void runCommand("emergency");
     timeline.push("STOP", "비상 정지 · 모터 즉시 차단");
@@ -480,10 +469,13 @@ onRcError((message) => {
 });
 
 onLink((e) => {
-  // A recovered native link only says UDP frames arrived. It does not say
-  // WebKit decoded them, so it cannot reopen the controls during the paint
-  // gate.
-  linkOk = controlsReady && e.kind === "recovered";
+  // What `link.rs` saw on the wire, and nothing more. It does NOT decide
+  // whether there is a picture: a silence report arrived once while frames
+  // were painting at 30 fps and blanked the canvas behind the hatch. The
+  // supervisor owns that verdict, keyed on painted frames; this only fills the
+  // status bar's LINK cell. Guarded on the phase so an event from a session
+  // already torn down cannot mark a fresh one silent.
+  if (phase === "online") linkOk = e.kind === "recovered";
   if (e.kind === "silent") {
     timeline.push("LINK", `영상이 ${e.seconds}초째 도착하지 않습니다`);
     consolePanel.push("err", `!  video silent ${e.seconds}s`);
@@ -497,69 +489,34 @@ onVision((event) => {
   vision.accept(event);
 });
 
-// --- landing ---------------------------------------------------------------
-
-function paintLanding(): void {
-  landing.update({
-    endpoints: link,
-    probing,
-    probes,
-    connecting: busy,
-    hint: busy
-      ? "핸드셰이크 · streamoff → streamon → 영상 흐름 확인"
-      : link === null
-        ? "엔드포인트를 읽는 중…"
-        : "노드와 드론의 전원을 먼저 확인하세요",
-    update:
-      pendingUpdate === null
-        ? null
-        : { version: pendingUpdate.version, applying: updateApplying, error: updateError },
-  });
-}
+// --- self-update -----------------------------------------------------------
 
 /**
- * Replaces this build with the newer one and restarts. Only reachable from the
- * landing screen: the installer replaces the binary underneath a running
- * process, so nothing may be in flight - least of all a drone.
+ * Replaces this build with the newer one and restarts.
+ *
+ * The installer replaces the binary underneath a running process, so nothing
+ * may be in flight - least of all a drone. With the landing screen gone, that
+ * guarantee is no longer a matter of which screen you are on: the offer is
+ * only rendered while the link is down (`updateView()`), and this refuses
+ * again here so a stale click during a reconnect cannot get through.
  */
 async function applyUpdate(): Promise<void> {
-  if (pendingUpdate === null || updateApplying || probing || busy) return;
+  if (pendingUpdate === null || updateApplying || phase !== "offline") return;
   updateApplying = true;
   updateError = null;
-  paintLanding();
-  landing.log(`[update] ${pendingUpdate.asset} 내려받는 중 (${Math.round(pendingUpdate.size / 1e6)} MB)`);
+  consolePanel.push("info", `update: ${pendingUpdate.asset} 내려받는 중 (${Math.round(pendingUpdate.size / 1e6)} MB)`);
   try {
     const staged = await updateApply(pendingUpdate);
     // Rust exits the process on success, so reaching here means either the
     // handoff returned without replacing anything, or this is a dry run.
-    landing.log(
-      staged === null
-        ? "[update] 설치 프로그램에 넘겼습니다 · 곧 재시작됩니다"
-        : `[update] 검증 완료 (설치는 건너뜀) · ${staged}`,
+    consolePanel.push(
+      "info",
+      staged === null ? "update: 설치 프로그램에 넘겼습니다 · 곧 재시작됩니다" : `update: 검증 완료 (설치는 건너뜀) · ${staged}`,
     );
   } catch (err) {
     updateApplying = false;
     updateError = errText(err);
-    landing.log(`[err] update: ${updateError}`);
-    paintLanding();
-  }
-}
-
-async function runProbe(): Promise<void> {
-  if (probing || busy) return;
-  probing = true;
-  probes = null;
-  paintLanding();
-  landing.log(`[probe] 소켓 세 개와 드론 응답을 확인합니다`);
-  try {
-    probes = await preflight();
-    for (const p of probes) landing.log(`[${p.ok ? "ok " : "err"}] ${p.label} · ${p.detail}`);
-  } catch (err) {
-    landing.log(`[err] preflight: ${errText(err)}`);
-    probes = [];
-  } finally {
-    probing = false;
-    paintLanding();
+    consolePanel.push("err", `!  update: ${updateError}`);
   }
 }
 
@@ -606,22 +563,88 @@ async function waitForFirstPaint(candidate: VideoRenderer): Promise<void> {
   }
 }
 
-async function doConnect(): Promise<void> {
-  if (busy || renderer !== null) return;
-  busy = true;
-  // A task created by the previous session must not reach the newly live
-  // native worker while this connection is still waiting on a decoded frame.
+// --- the connection supervisor ---------------------------------------------
+
+/**
+ * The link keeps itself up. There is no connect button and no landing screen,
+ * because there was never a decision to make: every launch ended with the
+ * operator pressing the same button until a picture appeared.
+ *
+ * **A picture is the definition of connected.** Not a resolved handshake, not
+ * UDP arriving - those can all be true while the operator stares at a black
+ * canvas, which is the failure this app has hit most. So `online` means frames
+ * are painting, and the moment they stop for `PICTURE_STALL_MS` the session is
+ * torn down and dialled again. `link.rs`'s own silence event is a symptom
+ * report, not the verdict; the verdict is `stats.painted`.
+ */
+const RETRY_MIN_MS = 1_500;
+const RETRY_MAX_MS = 8_000;
+/** Two seconds of a 30 fps stream is sixty missing frames - long past any
+ *  jitter the decoder smooths over, and short enough that a reconnect starts
+ *  while the operator is still looking at the last good frame. */
+const PICTURE_STALL_MS = 2_000;
+/** Three failures in a row stops being a slow drone and starts being a setup
+ *  problem, which is what the socket probes answer. */
+const PROBE_AFTER_FAILURES = 3;
+
+let phase: LinkView["phase"] = "offline";
+let detail = "";
+let failures = 0;
+let retryAt = 0;
+/** Painted-frame count and when it last moved - the stall detector's whole
+ *  state, and the reason this needs no timer of its own. */
+let lastPainted = 0;
+let lastPaintedAt = 0;
+
+function setPhase(next: LinkView["phase"], why: string): void {
+  phase = next;
+  detail = why;
+}
+
+/** What the top bar renders. Split out because the offer is gated on the link,
+ *  not on a screen: an installer must never run with a drone in the air. */
+function updateView(): StationModel["update"] {
+  if (pendingUpdate === null || phase !== "offline") return null;
+  return { version: pendingUpdate.version, applying: updateApplying, error: updateError };
+}
+
+/** Tears the session down and leaves the supervisor offline. Safe to call with
+ *  nothing running, which is what makes it usable from both the failure path
+ *  and the stall path. */
+async function teardown(why: string): Promise<void> {
   controlsReady = false;
   linkOk = false;
   visionModeRevision++;
   copilot.abort();
+  // Autonomy, then sticks: the drone keeps flying on the last rc it heard, and
+  // this is the point past which nothing is left to send another.
+  follow.stop("session");
+  keymap.neutral();
   keymap.setEnabled(false);
   consolePanel.setEnabled(false);
-  paintLanding();
+  if (renderer !== null) {
+    try {
+      await disconnect();
+    } catch (err) {
+      consolePanel.push("err", `!  disconnect: ${errText(err)}`);
+    }
+    renderer.close();
+    renderer = null;
+  }
+  vision.setSessionLive(false);
+  droneState = null;
+  lastTelemetry = null;
+  prevPkts = null;
+  rxPktsPerSec = null;
+  status = "idle";
+  setPhase("offline", why);
+}
 
-  let nativeSessionStarted = false;
+async function attempt(): Promise<void> {
+  busy = true;
+  setPhase("connecting", "핸드셰이크 · streamoff → streamon → 영상 흐름 확인");
   const t0 = performance.now();
-  landing.log(`[link] connect() · ${link?.tello ?? "?"}`);
+  let started = false;
   try {
     // Built before the await: Rust starts pushing frames the instant the
     // handshake completes, and a renderer created afterwards drops the head of
@@ -631,98 +654,89 @@ async function doConnect(): Promise<void> {
     // adapter is armed before IPC starts and cleared again on any failure.
     vision.setSessionLive(true);
     await connect();
-    nativeSessionStarted = true;
-    // Show the station as soon as frames are flowing, not after the first one
-    // paints: decode start-up is seconds on a cold link, and a landing screen
-    // that sits still for that long reads as a hang. Controls stay disabled
-    // until the frame has actually painted below, and the catch puts the
-    // landing screen back if it never does.
-    showStation(true);
-    landing.log("[link] native video flow confirmed · waiting for canvas paint");
+    started = true;
     await waitForFirstPaint(renderer);
 
     const ms = Math.round(performance.now() - t0);
-    landing.log(`[link] session up · video painted (${ms} ms)`);
+    failures = 0;
     controlsReady = true;
     linkOk = true;
+    lastPainted = renderer.stats().painted;
+    lastPaintedAt = performance.now();
     status = statusForMode(mode);
     queueVisionMode(mode);
-    timeline.push("LINK", `세션 시작 · ${link?.tello ?? ""} · Tello SDK 2.0`);
+    setPhase("online", "");
+    timeline.push("LINK", `세션 시작 · Tello SDK 2.0`);
     consolePanel.push("info", `session up with painted video in ${ms} ms`);
     keymap.setEnabled(mode === "key");
     consolePanel.setEnabled(true);
   } catch (err) {
-    // This runs while the native session is still present, so stopping a live
-    // follow loop can deliver its neutral RC before disconnect tears sockets
-    // down. Every producer stays closed even if a stale copilot turn wakes.
-    controlsReady = false;
-    linkOk = false;
-    visionModeRevision++;
-    copilot.abort();
-    follow.stop("session");
-    keymap.setEnabled(false);
-    consolePanel.setEnabled(false);
-    if (nativeSessionStarted) {
-      try {
-        await disconnect();
-      } catch (cleanupErr) {
-        landing.log(`[err] video-start cleanup: ${errText(cleanupErr)}`);
-      }
+    failures++;
+    const why = errText(err);
+    if (!started) renderer?.close();
+    if (started) {
+      await teardown(why);
+    } else {
+      renderer = null;
+      vision.setSessionLive(false);
+      setPhase("offline", why);
     }
-    renderer?.close();
-    renderer = null;
-    vision.setSessionLive(false);
-    showStation(false);
-    landing.log(`[err] ${errText(err)}`);
-    status = "idle";
-    busy = false;
-    paintLanding();
-  }
-}
-
-async function doDisconnect(): Promise<void> {
-  if (busy || renderer === null) return;
-  busy = true;
-  controlsReady = false;
-  linkOk = false;
-  visionModeRevision++;
-  copilot.abort();
-  // Autonomy, then sticks: the drone keeps flying on the last rc it heard, and
-  // the session teardown below is the point at which nothing is left to send
-  // one.
-  follow.stop("session");
-  keymap.neutral();
-  keymap.setEnabled(false);
-  // The copilot forgets with the session. Its memory is a list of things that
-  // happened to a drone that is about to stop existing; carrying it into the
-  // next flight would hand the model confident history about an airframe it
-  // has never seen.
-  copilotMemory.length = 0;
-  consolePanel.setEnabled(false);
-  try {
-    await disconnect();
-    timeline.push("LINK", "세션 종료");
-    landing.log("[link] 세션 종료");
-  } catch (err) {
-    consolePanel.push("err", `!  ${errText(err)}`);
+    consolePanel.push("err", `!  connect: ${why}`);
+    // Back off, but never past the point where an operator would assume the
+    // app gave up: the ceiling is eight seconds, not a minute.
+    const wait = Math.min(RETRY_MIN_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+    retryAt = performance.now() + wait;
+    // Awaited here, inside the `busy` hold, so the supervisor cannot start the
+    // next attempt while preflight has the three sockets open.
+    if (failures === PROBE_AFTER_FAILURES) await probeSockets();
   } finally {
-    renderer?.close();
-    renderer = null;
-    droneState = null;
-    lastTelemetry = null;
-    prevPkts = null;
-    rxPktsPerSec = null;
-    status = "idle";
-    linkOk = false;
     busy = false;
-    showStation(false);
-    paintLanding();
   }
 }
 
-function showStation(on: boolean): void {
-  landingRoot.style.display = on ? "none" : "flex";
-  stationRoot.style.display = on ? "flex" : "none";
+/** Only ever called with `busy` held and no session: `preflight` binds the
+ *  same three sockets a live link owns and would otherwise report AddrInUse
+ *  against ourselves. */
+async function probeSockets(): Promise<void> {
+  if (renderer !== null) return;
+  try {
+    for (const p of await preflight()) {
+      consolePanel.push(p.ok ? "info" : "err", `${p.ok ? "" : "!  "}probe ${p.label} · ${p.detail}`);
+    }
+  } catch (err) {
+    consolePanel.push("err", `!  preflight: ${errText(err)}`);
+  }
+}
+
+/**
+ * One supervisor step, driven by the shell tick so there is no second clock to
+ * keep in step with the repaint that renders its decisions.
+ */
+function superviseLink(): void {
+  if (busy || updateApplying) return;
+  if (phase === "online") {
+    if (renderer === null) {
+      setPhase("offline", "렌더러 없음");
+      return;
+    }
+    const painted = renderer.stats().painted;
+    const now = performance.now();
+    if (painted !== lastPainted) {
+      lastPainted = painted;
+      lastPaintedAt = now;
+      return;
+    }
+    if (now - lastPaintedAt < PICTURE_STALL_MS) return;
+    const stalled = Math.round((now - lastPaintedAt) / 100) / 10;
+    timeline.push("LINK", `영상 정지 ${stalled}초 · 재연결`);
+    consolePanel.push("err", `!  picture stalled ${stalled}s - reconnecting`);
+    void teardown(`영상이 ${stalled}초간 멈춰 재연결합니다`).then(() => {
+      failures = 0;
+      retryAt = performance.now();
+    });
+    return;
+  }
+  if (phase === "offline" && performance.now() >= retryAt) void attempt();
 }
 
 // --- fullscreen ------------------------------------------------------------
@@ -782,40 +796,45 @@ window.addEventListener("blur", () => keymap.neutral());
 // --- shell repaint ---------------------------------------------------------
 
 setInterval(() => {
-  if (renderer === null) return;
-
-  const stats = renderer.stats();
+  superviseLink();
+  // Without a session there is still a shell to paint: the link chip and the
+  // hatch are the only things on screen that mean anything while offline, and
+  // they are exactly what the supervisor just changed.
+  const stats = renderer?.stats() ?? null;
   const fresh =
     droneState !== null && Date.now() * 1000 - droneState.recvEpochUs < STATE_STALE_MS * 1000
       ? droneState
       : null;
 
-  const videoLive = linkOk && stats.painted > 0;
+  // A picture on screen is exactly `phase === "online"`, and the supervisor
+  // maintains that from painted frames. Deriving it from `linkOk` instead put
+  // the hatch over a live 30 fps canvas the first time the wire went quiet.
+  const videoLive = phase === "online";
   const model: StationModel = {
-    ipcMs: stats.transportP50Ms,
-    decodeMs: stats.decodeMs,
-    fps: stats.displayedFps,
+    ipcMs: stats?.transportP50Ms ?? null,
+    decodeMs: stats?.decodeMs ?? null,
+    fps: stats?.displayedFps ?? null,
     mode,
     live: videoLive,
-    node: link?.node ?? "--",
-    tello: link?.tello ?? "--",
-    rttMs: stats.latencyP50Ms,
+    link: { phase, detail },
+    rttMs: stats?.latencyP50Ms ?? null,
     bat: fresh?.bat ?? null,
     flightS: fresh?.time ?? null,
     status,
     rxPktsPerSec,
     mbps: lastTelemetry?.mbps ?? null,
     gapMaxMs: lastTelemetry?.gapMaxMs ?? null,
-    dropped: stats.droppedOnBacklog,
+    dropped: stats?.droppedOnBacklog ?? null,
     linkOk,
+    update: updateView(),
   };
   station.update(model);
   telemetry.update(fresh);
   overlay.update({
     state: fresh,
     live: videoLive,
-    width: stats.width,
-    height: stats.height,
+    width: stats?.width ?? 0,
+    height: stats?.height ?? 0,
     mode,
   });
 }, SHELL_HZ_MS);
@@ -824,21 +843,18 @@ setInterval(() => {
 
 keymap.setEnabled(false);
 consolePanel.setEnabled(false);
-paintLanding();
-landing.log(`[boot] AIdrone Station · ${hms()}`);
+consolePanel.push("info", `AIdrone Station · ${hms()}`);
 
+// The supervisor dials as soon as the tick starts; this only names the peer
+// the console prints beside its traffic, so a failure here costs a log line
+// and nothing else.
 void (async () => {
   try {
     link = await endpoints();
     consolePanel.setPeer(link.tello);
-    landing.log(`[cfg] command  ${link.tello}`);
-    landing.log(`[cfg] state    ${link.state}`);
-    landing.log(`[cfg] video    ${link.video}`);
-    landing.log(`[cfg] node     ${link.node}`);
   } catch (err) {
-    landing.log(`[err] endpoints: ${errText(err)}`);
+    consolePanel.push("err", `!  endpoints: ${errText(err)}`);
   }
-  paintLanding();
 })();
 
 // A launcher that cannot reach GitHub must still fly a drone, so this failure
@@ -846,11 +862,8 @@ void (async () => {
 void (async () => {
   try {
     pendingUpdate = await updateCheck();
-    if (pendingUpdate !== null) {
-      landing.log(`[update] 새 버전 ${pendingUpdate.version} · ${pendingUpdate.asset}`);
-      paintLanding();
-    }
+    if (pendingUpdate !== null) consolePanel.push("info", `update: 새 버전 ${pendingUpdate.version} · ${pendingUpdate.asset}`);
   } catch (err) {
-    landing.log(`[update] 확인 실패 · ${errText(err)}`);
+    consolePanel.push("info", `update: 확인 실패 · ${errText(err)}`);
   }
 })();

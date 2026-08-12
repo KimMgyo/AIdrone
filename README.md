@@ -95,7 +95,7 @@ app/               Tauri desktop client (Rust sockets + WebView2 UI)
   src/transport.ts typed Tauri command/event bridge
   src/render.ts    WebCodecs decode -> canvas
   src/lib/aruco.ts native-observation state, target selection, and UI listeners
-  src/screens/     landing preflight and live station shell
+  src/screens/     the station shell - the only screen
   src/panels/      mode selector, key map/RC, vision, telemetry, console, copilot, timeline
   src/ui.ts        typed DOM helpers and clamped numeric input binding
 desktop/ports.ps1     serial ports + network adapters, one snapshot
@@ -224,7 +224,7 @@ Ubuntu install.
 ### Updating itself
 
 On launch the app asks GitHub for this project's newest release, and offers it
-on the landing screen when it is newer than the running build. Accepting it
+in the top bar when it is newer than the running build. Accepting it
 downloads the artifact for this exact platform, checks the SHA-256 GitHub
 publishes beside it, installs, and restarts.
 
@@ -235,9 +235,10 @@ on Ubuntu the `.deb` is the only artifact that can declare
 
 What it will and will not do:
 
-- **Only from the landing screen.** The installer replaces the binary
-  underneath a running process, so the button is disabled while a probe or a
-  connect is in flight, and there is no path to it during a session.
+- **Only while the link is down.** The installer replaces the binary
+  underneath a running process, so the offer is rendered only when the
+  supervisor reports offline, and `applyUpdate()` refuses again on the same
+  condition so a click landing during a reconnect cannot get through.
 - **Only an artifact it can check.** An asset GitHub reports no digest for is
   not offered at all, and a download whose SHA-256 does not match is deleted
   rather than installed. This is integrity, not provenance: it proves the bytes
@@ -324,11 +325,11 @@ A layout is judged in its states, not its happy path, so the mock takes flags:
 
 | flag | what it puts on screen |
 |---|---|
-| `?autoconnect=1` | skips the landing screen - every save reloads straight back to the station |
 | `?bat=14` | holds the battery there; the colour thresholds are 30 and 15 |
-| `?update=1` | the "new version" banner |
+| `?update=1` | the "new version" chip - pair with `?empty=1`, it only shows while offline |
 | `?empty=1` | no video, so the first-paint gate fails and its error is visible |
-| `?silent=8` | the datapath goes silent 8 s in |
+| `?silent=8` | the datapath reports silent 8 s in, frames keep coming - the supervisor must not reconnect |
+| `?stall=6` | the frames stop 6 s in with the session still up - the supervisor must notice and dial again |
 
 What it is not: a simulator. Nothing here models a drone, and a protocol
 question belongs to `desktop/fake-tello.ts` against the real binary. The
@@ -744,10 +745,10 @@ the stamp from its own clock.
 
 The live UI is a ground station, not a floating viewer:
 
-- `src/screens/landing.ts` is the safe entry point: it exposes the command,
-  state, video and node endpoints, runs preflight probes, and retains the
-  bounded boot log. A disconnected session is visibly inert.
-- `src/screens/station.ts` docks a 4:3 canvas between two 300 px rails. Its
+- `src/screens/station.ts` is the only screen. There is no landing step and no
+  connect button: the supervisor in `main.ts` dials on boot and keeps dialling,
+  and the shell reports what it is doing through one link chip and the hatch
+  over the stage. It docks a 4:3 canvas between two 300 px rails. Its
   exclusive left-rail mode selector exposes manual keyboard control, native
   person tracking, and a native detector-only ArUco surface; telemetry remains
   below. The right rail holds the LLM copilot and an action
@@ -897,8 +898,8 @@ The live UI is a ground station, not a floating viewer:
 
 Every real command and RC update goes through the same Rust SDK socket. Ending
 a session neutralizes the sticks first, disables the console and manual panel,
-stops the detector/renderer, returns to the landing screen, and appends
-`세션 종료` to its boot log.
+stops the detector/renderer, and drops the shell to its offline state - from
+which the supervisor immediately begins dialling again.
 
 Measured 2026-08-08, same machine, 960x720:
 
@@ -925,6 +926,35 @@ more per frame than the GPU path, on a 13700K.
 > hardware path answers by buffering a 12-frame DPB. `optimizeForLatency:
 > true` holds on the simulator and is ignored by the D3D11 decoder on the
 > drone. See *Solved: the 502 ms reading was the decoder's DPB*.
+
+### A picture is the definition of connected
+
+There is no connect button, because there was never a decision behind it:
+every launch ended with the operator pressing the same button until a picture
+appeared. `main.ts` supervises the link instead - it dials on boot, retries
+with backoff from 1.5 s to a ceiling of 8 s, and never gives up.
+
+The verdict is deliberately **not** the handshake resolving, and not UDP
+arriving. Both can be true while the operator stares at a black canvas, which
+is the failure this app has hit most often (a WebView with no H.264 decoder,
+an SPS the decoder cannot hold, a DPB that swallowed twelve frames). `online`
+means `stats.painted` is advancing; two seconds of it not advancing is
+`offline`, and the supervisor tears the session down and dials again.
+
+That split had to be enforced in one more place than it looks. `link.rs` emits
+its own silence event, and the shell used to derive the picture from it:
+`videoLive = linkOk && painted > 0`. The first time the wire went quiet while
+frames were still painting, the hatch dropped over a live 30 fps canvas. The
+silence report is a symptom the status bar prints in its `LINK` cell; the
+supervisor's phase is the verdict, and `?silent=8` in the browser mock is the
+regression that keeps the two apart.
+
+Tearing down is the same path a failure takes, in the same order safety needs:
+autonomy stopped, sticks neutralised, console and manual panel disabled, then
+the sockets. Three failures in a row is no longer a slow drone, so the socket
+preflight runs itself and prints all three results to the console - awaited
+inside the attempt's own `busy` hold, because `preflight` binds the same three
+ports and would otherwise report AddrInUse against a session it raced.
 
 ### The UI runtime: Tailwind 4, no component framework
 
@@ -1595,8 +1625,8 @@ decode into Rust on Linux, which trades the WebCodecs architecture for it.
    settle times before giving up with an error that names the remedy. The
    frontend now requires a real canvas paint after that native proof and before
    it enables manual or console controls; a missing WebKit/GStreamer decoder
-   tears the just-created session down and leaves the operator on the landing
-   screen with the decoder error rather than a black “connected” station.
+   tears the just-created session down and leaves the shell offline with the
+   decoder error on the hatch rather than a black "connected" station.
 
 5. **Closing the window stranded the drone - every time.** Defect 4 blamed
    "any hard stop", which was too generous: Tauri does not drop managed state
@@ -1696,11 +1726,11 @@ Verified on hardware (WEMOS LOLIN S3 Mini + Windows 11 + a real Tello):
     stream. Two defects fell out of measuring it; a third reading is still
     open. See *Desktop app - the receive-to-paint budget*.
 12. **The desktop ground station has an end-to-end simulator proof.** A fresh
-    release build opens on the preflight screen, establishes the session, paints
-    the 960x720 stream, and renders live telemetry. Holding `W` emits
+    release build dials on its own, establishes the session, paints the
+    960x720 stream, and renders live telemetry. Holding `W` emits
     `rc 0 60 0 0` at 10 Hz; releasing it emits `rc 0 0 0 0`; the command console
-    receives the live `battery?` reply. Disconnect returns to the landing
-    screen and records `세션 종료`; controls are inert without a session.
+    receives the live `battery?` reply. Losing the picture drops the shell to
+    offline and it reconnects itself; controls are inert without a session.
 13. **Native vision modes have simulator evidence.** A generated 960×720
     `ARUCO_MIP_36h12` ID 0 frame reached the Rust detector with Hamming distance
     0 at 3 ms analysis time. A 960×720 H.264 person fixture reached bundled

@@ -15,12 +15,17 @@
  *
  *   bun run dev   ->   http://localhost:1420
  *
- * Query flags, because a layout is judged in its states, not its happy path:
- *   ?autoconnect=1  skip the landing screen; every reload lands on the station
- *   ?update=1       offer a fake newer release on the landing screen
+ * Query flags, because a layout is judged in its states, not its happy path.
+ * There is no autoconnect flag: the app supervises its own link, so every
+ * reload already lands on a live station.
+ *   ?update=1       offer a fake newer release; the top bar shows it while the
+ *                   link is down, so pair it with ?empty=1 to see the chip
  *   ?empty=1        no video at all - the connect fails on the first-paint
  *                   gate, which is the only way to see that error's wording
- *   ?silent=8       report the datapath silent this many seconds in
+ *   ?silent=8       report the datapath silent this many seconds in - the
+ *                   frames keep coming, so the supervisor must NOT reconnect
+ *   ?stall=6        stop the frames this many seconds in, session still up -
+ *                   the supervisor should notice and dial again
  *   ?bat=14         hold the battery here (colour thresholds are 30 / 15)
  */
 import { VISION_ARUCO_ENGINES } from "../transport.ts";
@@ -146,9 +151,16 @@ function startVideo(current: Session, units: Uint8Array[]): void {
   let cursor = 0;
   let frames = 0;
   let bytes = 0;
+  // The picture stopping mid-session is a first-class state now - it is what
+  // the supervisor calls offline - so the mock has to be able to produce it.
+  // Frames stop; the socket, the state stream and the session all stay up,
+  // which is exactly the case a link-level silence check cannot see.
+  const stallAt = number("stall", 0);
+  const startedAt = performance.now();
 
   current.timers.push(
     window.setInterval(() => {
+      if (stallAt > 0 && performance.now() - startedAt > stallAt * 1000) return;
       const unit = units[cursor++ % units.length]!;
       frames++;
       bytes += unit.length;
@@ -390,22 +402,8 @@ window.__TAURI_INTERNALS__ = {
   },
 };
 
-// Every save reloads the page, and a layout is usually being judged on the
-// station, not the landing screen. `?autoconnect=1` presses the button so the
-// iteration is edit -> look, with nothing in between. Polled rather than hung
-// off DOMContentLoaded: this module is imported dynamically, so it can arrive
-// after that event has already gone by.
-if (flag("autoconnect")) {
-  const deadline = performance.now() + 5000;
-  const press = (): void => {
-    const button = document.querySelector<HTMLButtonElement>('[data-k="connect"]');
-    if (button !== null) button.click();
-    else if (performance.now() < deadline) window.setTimeout(press, 50);
-  };
-  window.setTimeout(press, 50);
-}
 
 console.info(
   "[dev] Tauri IPC mocked - drone, video and copilot are fake.",
-  "Flags: ?autoconnect=1 ?update=1 ?empty=1 ?silent=8 ?bat=14",
+  "Flags: ?update=1 ?empty=1 ?silent=8 ?stall=6 ?bat=14",
 );

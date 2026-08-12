@@ -18,14 +18,34 @@
 import type { ControlMode } from "../control-mode.ts";
 import { mmss, must, style, text } from "../ui.ts";
 
+/**
+ * The connection, as the shell needs to show it. `detail` is the reason a
+ * picture is not on screen - a failure message, or how long until the next
+ * attempt - and is empty exactly when there is nothing to explain.
+ */
+export type LinkView = {
+  phase: "connecting" | "online" | "offline";
+  detail: string;
+};
+
+/** The newer build, once GitHub has been asked. Offered in the top bar only
+ *  while the link is down: the installer replaces this binary underneath a
+ *  running process, so it must never be reachable with a drone in the air. */
+export type UpdateView = {
+  version: string;
+  applying: boolean;
+  error: string | null;
+};
+
 /** Every live cell in the shell, in one shape. Panels own their own state; this
  *  is only the chrome around them. */
 export type StationModel = {
   /** The selected left-rail surface. It is a selection, not an autonomous-flight claim. */
   mode: ControlMode;
   live: boolean;
-  node: string;
-  tello: string;
+  /** What the supervisor is doing about the link. The addresses it dials are
+   *  fixed constants, so they are not modelled here - only the outcome is. */
+  link: LinkView;
   /** Measured receive-to-paint p50, not a command round-trip time. */
   rttMs: number | null;
   /** The transport half of that same number: Rust's arrival stamp to the
@@ -49,6 +69,8 @@ export type StationModel = {
   dropped: number | null;
   /** False once link.rs reports the datapath silent. */
   linkOk: boolean;
+  /** `null` while this build is current, or while a drone is flying. */
+  update: UpdateView | null;
 };
 
 export interface Station {
@@ -88,9 +110,23 @@ const TOGGLE =
   "w-[28px] h-[26px] bg-chip border border-[#232931] rounded-[3px] cursor-pointer flex items-center justify-center hover:bg-[#1C222A] hover:border-line4";
 const HEADER_DOT = "w-[6px] h-[6px] rounded-full";
 
+/** One word per phase, used by the chip and the hatch alike so the two can
+ *  never describe the link differently. */
+const LINK_COPY: Record<LinkView["phase"], string> = {
+  connecting: "연결 중",
+  online: "연결됨",
+  offline: "오프라인",
+};
+
+const LINK_DOT: Record<LinkView["phase"], string> = {
+  connecting: "bg-warn animate-beat",
+  online: "bg-ok animate-beat",
+  offline: "bg-alert",
+};
+
 type StationDeps = {
-  onDisconnect: () => void;
   onEmergency: () => void;
+  onUpdate: () => void;
   /**
    * The Tauri host can provide its native window toggle. The browser fallback
    * keeps the visual control useful in a plain webview without coupling this
@@ -117,13 +153,18 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       </div>
       <div class="w-px h-[20px] bg-line"></div>
 
+      <!-- One chip for the link, because the supervisor owns it: the operator
+           has no connect button to press and no address to read - both ends
+           are fixed constants the app already knows. What is worth a cell is
+           whether a picture is arriving, and if not, when the next attempt
+           lands. -->
       <div class="${CHIP}">
-        <div data-k="node-dot" class="${HEADER_DOT} bg-dim3"></div>
-        <div class="font-mono text-[11px] text-ink2">NODE <span data-k="node">--</span></div>
+        <div data-k="link-dot" class="${HEADER_DOT} bg-dim3"></div>
+        <div data-k="link-copy" class="font-mono text-[11px] text-ink2">연결 대기</div>
       </div>
-      <div class="${CHIP}">
-        <div data-k="tello-dot" class="${HEADER_DOT} bg-dim3"></div>
-        <div class="font-mono text-[11px] text-ink2">TELLO <span data-k="tello">--</span></div>
+      <div data-k="update" class="${CHIP} border-accent/40 bg-accent/10" hidden>
+        <div class="font-mono text-[11px] text-accent">새 버전 <span data-k="update-version">--</span></div>
+        <button data-k="update-apply" type="button" class="h-[19px] rounded-[2px] bg-accent px-[7px] font-mono text-[10px] font-semibold text-[#08131A] cursor-pointer hover:bg-accent2 disabled:opacity-50 disabled:cursor-default">설치</button>
       </div>
 
       <div class="flex-1"></div>
@@ -153,8 +194,6 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       </div>
       <div class="w-px h-[20px] bg-line"></div>
 
-      <button data-k="disconnect" type="button"
-        class="h-[30px] px-[13px] bg-chip border border-[#232931] rounded-[3px] text-ink2 text-[12px] cursor-pointer hover:bg-[#1C222A] hover:border-line4">연결 해제</button>
       <button data-k="estop" type="button" title="모터 즉시 정지 (ESC)"
         class="h-[30px] px-[15px] bg-alert/12 border border-alert/45 rounded-[3px] text-alert2 text-[12px] font-semibold cursor-pointer hover:bg-alert/22 hover:text-[#FFB3B3]">비상 정지</button>
     </div>
@@ -174,8 +213,12 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
         <div data-k="stage" class="flex-none m-auto w-full relative bg-[#0E1114] overflow-hidden">
           <div data-k="hatch" class="absolute inset-0"
             style="background-image:repeating-linear-gradient(135deg,#12161A 0px,#12161A 9px,#0E1114 9px,#0E1114 18px)"></div>
-          <div data-k="hatch-label" class="absolute inset-0 flex items-center justify-center">
-            <div class="font-mono text-[11px] tracking-[.2em] text-[#373F49]">DRONE&nbsp;CAMERA&nbsp;FEED&nbsp;&middot;&nbsp;H.264&nbsp;UDP&nbsp;11111</div>
+          <!-- The hatch is the connection screen now. There is no separate one
+               to return to, so what used to be a static caption carries the
+               supervisor's state and, when it failed, the reason. -->
+          <div data-k="hatch-label" class="absolute inset-0 flex flex-col items-center justify-center gap-[9px] px-[24px]">
+            <div data-k="hatch-state" class="font-mono text-[11px] tracking-[.2em] text-[#5A646F]">영상 대기</div>
+            <div data-k="hatch-detail" class="max-w-[520px] text-center font-mono text-[10.5px] leading-[1.6] text-[#373F49]"></div>
           </div>
           <canvas id="video" width="960" height="720" class="absolute inset-0"></canvas>
           <div data-k="m-overlay" class="absolute inset-0 pointer-events-none"></div>
@@ -237,10 +280,13 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
   };
 
   const cell = {
-    node: q("node", HTMLSpanElement),
-    nodeDot: q("node-dot", HTMLDivElement),
-    tello: q("tello", HTMLSpanElement),
-    telloDot: q("tello-dot", HTMLDivElement),
+    linkDot: q("link-dot", HTMLDivElement),
+    linkCopy: q("link-copy", HTMLDivElement),
+    update: q("update", HTMLDivElement),
+    updateVersion: q("update-version", HTMLSpanElement),
+    updateApply: q("update-apply", HTMLButtonElement),
+    hatchState: q("hatch-state", HTMLDivElement),
+    hatchDetail: q("hatch-detail", HTMLDivElement),
     rtt: q("rtt", HTMLSpanElement),
     bat: q("bat", HTMLDivElement),
     flight: q("flight", HTMLDivElement),
@@ -289,7 +335,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
   const ro = new ResizeObserver(() => measure());
   ro.observe(row);
 
-  q("disconnect", HTMLButtonElement).addEventListener("click", deps.onDisconnect);
+  cell.updateApply.addEventListener("click", deps.onUpdate);
   q("estop", HTMLButtonElement).addEventListener("click", deps.onEmergency);
 
   function setLeft(open: boolean): void {
@@ -350,14 +396,21 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       style(hatchLabel, "display", m.live ? "none" : "flex");
       style(canvas, "display", m.live ? "block" : "none");
 
-      const node = known(m.node);
-      const tello = known(m.tello);
-      text(cell.node, node);
-      text(cell.tello, tello);
-      const nodeLive = m.live && node !== MISSING;
-      const telloLive = m.live && tello !== MISSING;
-      cell.nodeDot.className = `${HEADER_DOT} ${nodeLive ? "bg-ok animate-beat" : "bg-dim3"}`;
-      cell.telloDot.className = `${HEADER_DOT} ${telloLive ? "bg-ok" : "bg-dim3"}`;
+      // The chip and the hatch say the same thing at two sizes: the chip is
+      // the glance, the hatch is the one that has room for the reason.
+      const phase = m.link.phase;
+      text(cell.linkCopy, LINK_COPY[phase]);
+      cell.linkDot.className = `${HEADER_DOT} ${LINK_DOT[phase]}`;
+      text(cell.hatchState, LINK_COPY[phase]);
+      text(cell.hatchDetail, m.link.detail);
+
+      cell.update.hidden = m.update === null;
+      if (m.update !== null) {
+        text(cell.updateVersion, m.update.version);
+        cell.updateApply.disabled = m.update.applying;
+        text(cell.updateApply, m.update.applying ? "설치 중" : "설치");
+        if (m.update.error !== null) cell.updateApply.title = m.update.error;
+      }
 
       // Battery and flight time are the only aircraft readings up here; every
       // measurement of the picture's own path lives in the strip below.
