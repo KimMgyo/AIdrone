@@ -19,9 +19,10 @@ pub const FAMILY_NAME: &str = "ARUCO_MIP_36h12";
 ///
 /// Row-major 6x6 exactly as `aruco-rs` stores it - bit 35 is the top-left
 /// payload cell, walking rows - which is the order a renderer wants and the
-/// opposite of the perimeter-first order the AprilTag family needs. The
-/// panel's marker library draws from this so the glyph an operator clicks is
-/// generated from the same list the detector decodes, never a second table.
+/// opposite of the perimeter-first order the AprilTag family needs. The panel
+/// matches its 6x6 drawing pad against this list and chips each roster row
+/// with the glyph it produces, so both come from the same table the detector
+/// decodes rather than a second one drawn by hand.
 pub fn payload_codes() -> Result<Vec<u64>, String> {
     let config = &DICTIONARY_ARUCO_MIP_36H12;
     if config.n_bits != 36 || config.code_list.len() != 250 {

@@ -36,11 +36,12 @@ function emptyRosterNote(state: ArucoVisionState): string | null {
 type MarkerRow = {
   root: HTMLDivElement;
   button: HTMLButtonElement;
-  chip: HTMLSpanElement;
+  chip: HTMLCanvasElement;
   title: HTMLSpanElement;
   facts: HTMLSpanElement;
   tag: HTMLSpanElement;
   sizeBox: HTMLLabelElement;
+  forget: HTMLButtonElement;
   size: HTMLInputElement;
 };
 
@@ -48,29 +49,54 @@ type MarkerRow = {
 const SIZE_BOX = "flex flex-none items-center gap-[4px] rounded-[3px] border px-[7px]";
 
 /**
- * The registry refuses to store a measurement it cannot parse, so the only
- * record that the operator typed something unusable is the text still sitting
- * in the field. This reads that back rather than tracking a flag beside a row
- * that repaints at stream rate and would have to keep the two in step.
+ * `selected` tints the whole row, not just the button: the size field and the
+ * remove control belong to the marker being followed as much as its name does,
+ * and leaving them grey made the row look half-selected.
  */
-function paintSizeField(row: MarkerRow): void {
+function paintSizeField(row: MarkerRow, selected: boolean): void {
   const rejected = row.size.value.trim() !== "" && parseMarkerSize(row.size.value) === null;
-  cls(row.sizeBox, `${SIZE_BOX} ${rejected ? "border-alert/45 bg-alert/10" : "border-line2 bg-sunken"}`);
+  const frame = rejected
+    ? "border-alert/45 bg-alert/10"
+    : selected
+      ? "border-warn/45 bg-warn/10"
+      : "border-line2 bg-sunken";
+  cls(row.sizeBox, `${SIZE_BOX} ${frame}`);
+  cls(
+    row.forget,
+    `${FORGET_BUTTON} ${
+      selected ? "border-warn/45 bg-warn/10 text-warn" : "border-line2 bg-sunken text-dim2"
+    } hover:border-alert/45 hover:text-alert2`,
+  );
 }
+
+const FORGET_BUTTON = "w-[24px] flex-none rounded-[3px] border font-mono text-[12px] cursor-pointer";
 
 /**
  * Rows are reconciled by marker id, never re-created from a template string.
- * The detector now publishes at the stream's own rate, and rebuilding this
- * list on each observation replaced the button under the pointer between
- * mousedown and mouseup - which is a click the browser never reports, and an
- * operator who cannot lock a target no matter how carefully they aim.
+ * The detector publishes at the stream's own rate, and rebuilding this list on
+ * each observation replaced the button under the pointer between mousedown and
+ * mouseup - a click the browser never reports.
  */
+
+/**
+ * One payload cell on the drawing pad.
+ *
+ * A hairline ring rather than a gap: the pad has to be comparable to a printed
+ * marker at a glance, and gaps between cells change the shape. The ring is dim
+ * enough to vanish against a filled neighbour and just enough to show the 6x6
+ * structure when every cell is black, which is how the pad starts.
+ */
+const PAD_CELL = "h-[17px] w-[17px] cursor-pointer ring-inset ring-[0.5px] ring-[#1E242B]";
+const PAD_CELL_OFF = `${PAD_CELL} bg-black`;
+const PAD_CELL_ON = `${PAD_CELL} bg-white`;
+
 function reconcileMarkerRows(
   list: HTMLDivElement,
   note: HTMLDivElement,
   rows: Map<number, MarkerRow>,
   state: ArucoVisionState,
   sizes: MarkerSizes,
+  codes: readonly number[],
 ): void {
   const message = emptyRosterNote(state);
   note.hidden = message === null;
@@ -90,7 +116,7 @@ function reconcileMarkerRows(
       // "forget this marker's size" instead of showing it as rejected.
       root.innerHTML = `
         <button data-k="select" type="button" class="flex min-w-0 flex-1 items-center gap-[10px] rounded-[3px] border px-[10px] py-[8px] text-left">
-          <span data-k="chip" class="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-[2px] border font-mono text-[10px]"></span>
+          <canvas data-k="chip" class="h-[30px] w-[30px] flex-none rounded-[2px]" style="image-rendering:pixelated"></canvas>
           <span class="min-w-0 flex-1">
             <span data-k="title" class="block font-mono text-[12px] text-ink"></span>
             <span data-k="facts" class="block truncate font-mono text-[10px] leading-[1.55] text-dim"></span>
@@ -102,21 +128,22 @@ function reconcileMarkerRows(
             class="w-[40px] min-w-0 border-none bg-transparent text-right font-mono text-[11px] text-ink outline-none" />
           <span class="font-mono text-[9.5px] text-dim2">cm</span>
         </label>
-        <button data-k="forget" type="button" title="목록에서 제거"
-          class="w-[24px] flex-none rounded-[3px] border border-line2 bg-sunken font-mono text-[12px] text-dim2 cursor-pointer hover:border-alert/45 hover:text-alert2">×</button>`;
+        <button data-k="forget" type="button" title="목록에서 제거" class="${FORGET_BUTTON} border-line2 bg-sunken text-dim2">×</button>`;
       const button = must("[data-k=select]", HTMLButtonElement, root);
       button.dataset.targetId = String(id);
-      must("[data-k=forget]", HTMLButtonElement, root).dataset.forgetId = String(id);
+      const forget = must("[data-k=forget]", HTMLButtonElement, root);
+      forget.dataset.forgetId = String(id);
       const size = must("[data-k=size]", HTMLInputElement, root);
       size.setAttribute("aria-label", `ID ${id} 마커 한 변 길이 (cm)`);
       const created: MarkerRow = {
         root,
         button,
-        chip: must("[data-k=chip]", HTMLSpanElement, root),
+        chip: must("[data-k=chip]", HTMLCanvasElement, root),
         title: must("[data-k=title]", HTMLSpanElement, root),
         facts: must("[data-k=facts]", HTMLSpanElement, root),
         tag: must("[data-k=tag]", HTMLSpanElement, root),
         sizeBox: must("[data-k=size-box]", HTMLLabelElement, root),
+        forget,
         size,
       };
       // `change`, not `input`: the half-typed "1" of "15" would register as a
@@ -132,7 +159,7 @@ function reconcileMarkerRows(
           // must not cost the operator a marker they already measured.
           if (cm !== null) sizes.set(id, cm);
         }
-        paintSizeField(created);
+        paintSizeField(created, id === state.target.id);
       });
       row = created;
       rows.set(id, created);
@@ -157,13 +184,14 @@ function reconcileMarkerRows(
             : "cursor-pointer border-line2 bg-sunken hover:border-line4 hover:bg-raised"
       }`,
     );
-    cls(
-      row.chip,
-      `flex h-[30px] w-[30px] flex-none items-center justify-center rounded-[2px] border font-mono text-[10px] ${
-        !followable ? "border-line3 text-dim2" : selected ? "border-warn/65 text-warn" : "border-line4 text-ink2"
-      }`,
-    );
-    text(row.chip, String(entry.id));
+    // The chip is the marker's own pattern, not its number: an operator holding
+    // a print matches it by looking, and the digits are on the line beside it.
+    // Drawn once per id, because a codeword does not change.
+    if (row.chip.dataset.drawn !== String(entry.id) && codes.length > entry.id) {
+      drawMarker(row.chip, codes[entry.id], 4);
+      row.chip.dataset.drawn = String(entry.id);
+    }
+    row.chip.style.opacity = followable ? "1" : "0.45";
     text(row.title, `ID ${entry.id}`);
     // A row on the roster but not in this frame has no geometry to print, and
     // printing the last frame's would be a position the drone is not seeing.
@@ -189,7 +217,7 @@ function reconcileMarkerRows(
     if (row.size !== document.activeElement && !holdingRejection) {
       const value = sizeCm === null ? "" : String(sizeCm);
       if (row.size.value !== value) row.size.value = value;
-      paintSizeField(row);
+      paintSizeField(row, selected);
     }
   }
 
@@ -265,50 +293,54 @@ function drawMarker(canvas: HTMLCanvasElement, code: number, cell: number): void
   }
 }
 
-/** One-time render of all 250 ids. Built once per panel, not per observation. */
-function buildLibrary(library: HTMLDivElement, codes: readonly number[]): void {
-  const fragment = document.createDocumentFragment();
-  for (const [id, code] of codes.entries()) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.libraryId = String(id);
-    button.title = `ID ${id} 추가`;
-    button.className = LIBRARY_TILE;
-    const canvas = document.createElement("canvas");
-    canvas.className = "w-full";
-    canvas.style.imageRendering = "pixelated";
-    drawMarker(canvas, code, 3);
-    const label = document.createElement("div");
-    label.className = "font-mono text-[8px] leading-none text-dim2";
-    label.textContent = String(id);
-    button.append(canvas, label);
-    fragment.append(button);
-  }
-  library.replaceChildren(fragment);
+/** Packs a 6x6 boolean grid the way the dictionary stores it: row-major, bit
+ *  35 at the top-left. */
+function packGrid(grid: readonly boolean[]): number {
+  let code = 0;
+  for (const on of grid) code = code * 2 + (on ? 1 : 0);
+  return code;
 }
 
-const LIBRARY_TILE =
-  "flex flex-col items-center gap-[2px] rounded-[2px] border border-line2 bg-sunken p-[3px] cursor-pointer hover:border-line4";
-
-/** The library's only per-frame work: which tiles are already on the roster. */
-function paintLibrarySelection(library: HTMLDivElement, state: ArucoVisionState): void {
-  const known = new Set(state.known.map((entry) => entry.id));
-  for (const tile of library.children) {
-    if (!(tile instanceof HTMLButtonElement)) continue;
-    const id = readId(tile.dataset.libraryId);
-    const on = id !== null && known.has(id);
-    cls(tile, `${LIBRARY_TILE} ${on ? "border-warn/60 bg-warn/10" : ""}`);
+/** One quarter turn clockwise. */
+function rotateGrid(grid: readonly boolean[]): boolean[] {
+  const out: boolean[] = [];
+  for (let row = 0; row < MIP_CELLS; row++) {
+    for (let column = 0; column < MIP_CELLS; column++) {
+      out.push(grid[(MIP_CELLS - 1 - column) * MIP_CELLS + row]);
+    }
   }
+  return out;
+}
+
+/**
+ * The id whose codeword the drawn grid IS, or null.
+ *
+ * Exact match only. A near miss is not offered as a suggestion, because the
+ * whole point of drawing the pattern is to name the marker the operator is
+ * holding, and "did you mean ID 91" is how you follow the wrong print. All
+ * four rotations are tried, though: the same physical marker read upside down
+ * is the same marker, and demanding the operator guess the dictionary's
+ * canonical orientation would fail honest input.
+ */
+function matchGrid(grid: readonly boolean[], codes: readonly number[]): number | null {
+  let candidate = grid;
+  for (let turn = 0; turn < 4; turn++) {
+    const code = packGrid(candidate);
+    const id = codes.indexOf(code);
+    if (id >= 0) return id;
+    candidate = rotateGrid(candidate);
+  }
+  return null;
 }
 
 export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): ArucoPanel {
   mount.innerHTML = `
     <section class="flex h-full min-h-0 flex-col gap-[10px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="ArUco marker detector">
       <!-- Three sections: who is being followed, the roster of markers that
-           can be, and the library to add one from. The roster is not called
-           DETECTED any more because it is no longer only what the camera can
-           see right now - a marker joins it by being detected OR by being
-           picked below, and stays until it is removed. -->
+           can be, and the pad that adds one by drawing it. The roster is not
+           called DETECTED any more because it is no longer only what the
+           camera can see right now - a marker joins it by being detected OR by
+           being drawn below, and stays until it is removed. -->
       <div data-k="target-mount"></div>
 
       <div class="flex items-center justify-between">
@@ -319,10 +351,25 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
       <div data-k="marker-list" class="flex flex-col gap-[6px]"></div>
 
       <div class="flex items-center justify-between border-t border-line2 pt-[9px]">
-        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKER LIBRARY</div>
+        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKER 그리기</div>
         <div class="font-mono text-[10px] text-dim3">${NATIVE_ARUCO_DICTIONARY}</div>
       </div>
-      <div data-k="library" class="grid max-h-[190px] grid-cols-[repeat(auto-fill,minmax(38px,1fr))] gap-[5px] overflow-y-auto pr-[2px]"></div>
+      <div class="flex items-start gap-[10px]">
+        <!-- The black frame is the marker's quiet border, drawn by the wrapper
+             so the 36 clickable cells are only the payload - which is exactly
+             what the dictionary stores and what an operator can read off a
+             print. -->
+        <div class="flex-none bg-black p-[6px]">
+          <div data-k="pad" class="grid grid-cols-6 gap-0"></div>
+        </div>
+        <div class="flex min-w-0 flex-1 flex-col gap-[6px]">
+          <div data-k="pad-id" class="font-mono text-[13px] text-dim">일치 없음</div>
+          <button data-k="pad-add" type="button" disabled
+            class="h-[26px] rounded-[3px] border border-line4 bg-key px-[9px] font-mono text-[10.5px] text-dim enabled:cursor-pointer enabled:hover:bg-btn enabled:hover:text-ink2 disabled:opacity-40">목록에 추가</button>
+          <button data-k="pad-clear" type="button"
+            class="h-[22px] rounded-[3px] border border-line2 bg-sunken px-[9px] font-mono text-[10px] text-dim2 cursor-pointer hover:border-line4 hover:text-ink2">지우기</button>
+        </div>
+      </div>
     </section>
   `;
 
@@ -330,13 +377,36 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const visible = must("[data-k=visible]", HTMLSpanElement, mount);
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
-  const library = must("[data-k=library]", HTMLDivElement, mount);
+  const pad = must("[data-k=pad]", HTMLDivElement, mount);
+  const padId = must("[data-k=pad-id]", HTMLDivElement, mount);
+  const padAdd = must("[data-k=pad-add]", HTMLButtonElement, mount);
   const markerRowNodes = new Map<number, MarkerRow>();
 
+  /** The drawn payload, and the codebook once Rust has answered. */
+  const grid: boolean[] = new Array<boolean>(MIP_CELLS * MIP_CELLS).fill(false);
+  let codes: readonly number[] = [];
+  let drawn: number | null = null;
+
+  const cells = Array.from({ length: MIP_CELLS * MIP_CELLS }, (_, index) => {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.dataset.cell = String(index);
+    cell.setAttribute("aria-label", `${Math.floor(index / MIP_CELLS) + 1}행 ${(index % MIP_CELLS) + 1}열`);
+    cell.className = PAD_CELL_OFF;
+    pad.append(cell);
+    return cell;
+  });
+
+  function paintPad(): void {
+    for (const [index, cell] of cells.entries()) cls(cell, grid[index] ? PAD_CELL_ON : PAD_CELL_OFF);
+    drawn = codes.length === 0 ? null : matchGrid(grid, codes);
+    text(padId, drawn === null ? "일치 없음" : `ID ${drawn}`);
+    cls(padId, `font-mono text-[13px] ${drawn === null ? "text-dim" : "text-warn"}`);
+    padAdd.disabled = drawn === null;
+  }
+
   let current = deps.vision.arucoSnapshot();
-  const target = installTargetBox(must("[data-k=target-mount]", HTMLDivElement, mount), "warn", deps.follow, () =>
-    deps.vision.setArucoTarget(null),
-  );
+  const target = installTargetBox(must("[data-k=target-mount]", HTMLDivElement, mount), "warn", deps.follow);
 
   const paint = (next: ArucoVisionState): void => {
     current = next;
@@ -353,29 +423,39 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
 
     text(count, String(next.known.length));
     text(visible, String(next.markers.length));
-    reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes);
-    paintLibrarySelection(library, next);
+    reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes, codes);
   };
 
   const onClick = (event: MouseEvent): void => {
-    // The release control lives inside the target box and has its own handler;
-    // this owns the roster rows and the library.
     const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("button") : null;
     if (button === null || !mount.contains(button)) return;
+
+    const cell = readId(button.dataset.cell);
+    if (cell !== null && cell < grid.length) {
+      grid[cell] = !grid[cell];
+      paintPad();
+      return;
+    }
+
+    if (button === padAdd) {
+      // Adding a drawn marker cannot arm the loop by itself: an unmeasured tag
+      // stays unfollowable, which the target box reports as 크기 필요 until a
+      // size is typed into its row.
+      if (drawn === null) return;
+      deps.vision.addArucoMarker(drawn);
+      if (deps.sizes.get(drawn) !== null) deps.vision.setArucoTarget(drawn);
+      return;
+    }
+
+    if (button.dataset.k === "pad-clear") {
+      grid.fill(false);
+      paintPad();
+      return;
+    }
 
     const forget = readId(button.dataset.forgetId);
     if (forget !== null) {
       deps.vision.forgetArucoMarker(forget);
-      return;
-    }
-
-    // The library adds a marker to the roster and selects it. It cannot arm
-    // the loop by itself: an unmeasured tag stays unfollowable, which the
-    // target box reports as 크기 필요 until a size is typed into its row.
-    const pick = readId(button.dataset.libraryId);
-    if (pick !== null) {
-      deps.vision.addArucoMarker(pick);
-      if (deps.sizes.get(pick) !== null) deps.vision.setArucoTarget(pick);
       return;
     }
 
@@ -392,17 +472,20 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const unsubscribeSizes = deps.sizes.subscribe(() => {
     paint(current);
   });
-  // The codebook is constant for the life of the build, so this is asked once
-  // and the glyphs are drawn once. A failure leaves the library empty rather
-  // than the panel broken - every other way of choosing a marker still works.
+  // The codebook is constant for the life of the build, so it is asked once.
+  // Until it answers the pad cannot name what is drawn on it, and the roster's
+  // glyphs stay blank - both of which are honest and neither of which stops a
+  // detected marker from being selected.
   void markerCodes()
-    .then((codes) => {
-      buildLibrary(library, codes);
-      paintLibrarySelection(library, current);
+    .then((table) => {
+      codes = table;
+      paintPad();
+      paint(current);
     })
     .catch(() => {
-      text(library, "");
+      paintPad();
     });
+  paintPad();
 
   return {
     dispose(): void {

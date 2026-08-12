@@ -1176,29 +1176,59 @@ beside `locked`, where it belongs.
 
 **The marker list is a roster, not a frame.** A printed marker does not stop
 existing when the drone looks away, so an id joins the list by being detected
-**or** by being picked from the library, stays until an `×` removes it, and
-shows `화면에 없음` in place of geometry while it is not in view. Forgetting
-the marker being followed releases it first - the loop may not keep steering
-at an id the operator has just taken off the list. The section is therefore
-called `MARKERS · n` with a `화면 n` count beside it rather than `DETECTED`:
-it is no longer only what the camera can see.
+**or** by being drawn on the pad below, stays until an `×` removes it, and
+shows `화면에 없음` in place of geometry while it is not in view - printing the
+last frame's position would be a place the drone is not looking. Forgetting the
+marker being followed releases it first: the loop may not keep steering at an
+id the operator has just taken off the list. The section is therefore called
+`MARKERS · n` with a `화면 n` count beside it rather than `DETECTED`, because it
+is no longer only what the camera can see. Each row is chipped with the
+marker's own **pattern** rather than its number, which is what an operator
+holding a print matches by looking; the digits are on the line beside it.
 
-**The marker library is 250 clickable glyphs**, drawn from the dictionary's
-own payload codes. `marker_codes()` returns the row-major 6x6 bits straight
-out of `DICTIONARY_ARUCO_MIP_36H12` - the same list `apriltag3.rs` repacks its
-family from - so the pattern an operator clicks is generated from the table
-the detector decodes, never a second hand-drawn one. The renderer uses
-`2 ** n` rather than `1 << n` deliberately: the shift operators coerce to
-int32, and a 36-bit code would lose every bit above 31 and read bit 35 as a
-sign.
+**A marker is added by drawing it on a 6x6 pad.** Thirty-six clickable payload
+cells inside a black border - the border is the wrapper, so the cells are only
+the payload, which is exactly what the dictionary stores and what can be read
+off a print. `marker_codes()` returns the row-major 6x6 bits straight out of
+`DICTIONARY_ARUCO_MIP_36H12`, the same list `apriltag3.rs` repacks its family
+from, so both the pad's matching and the roster's glyphs come from the table
+the detector decodes rather than a second hand-drawn one.
 
-Picking from the library adds the marker and selects it, but **cannot arm the
-loop**. The size requirement is untouched: an unmeasured tag is held at a
-distance nobody chose, so the row stays disabled and the target box reads
-크기 필요 until a measurement is typed into it. What the library changed is
-only which markers may be chosen - `setArucoTarget` now requires an id on the
-roster instead of one in the current frame, which is also what lets a lock
-survive the target leaving view.
+Two decisions inside the matcher:
+
+- **Exact match only.** A near miss is not offered as a suggestion, because the
+  point of drawing the pattern is to name the marker in the operator's hand,
+  and "did you mean ID 91" is how you follow the wrong print. Verified: one
+  wrong cell out of 36 reads `일치 없음`, not a neighbour.
+- **All four rotations are tried**, because the same physical marker read
+  upside down is the same marker and demanding the dictionary's canonical
+  orientation would fail honest input. Verified: all four rotations of ID 91
+  resolve to ID 91.
+
+The renderer uses `2 ** n` rather than `1 << n` deliberately: the shift
+operators coerce to int32, so a 36-bit code would lose every bit above 31 and
+read bit 35 as a sign.
+
+Adding a drawn marker **cannot arm the loop**. The size requirement is
+untouched: an unmeasured tag would be held at a distance nobody chose, so the
+row stays disabled and the target box reads 크기 필요 until a measurement is
+typed in. What changed is only which markers may be chosen - `setArucoTarget`
+now requires an id on the roster instead of one in the current frame, which is
+also what lets a lock survive the target leaving view.
+
+**The shipped print is pre-selected.** `DEFAULT_MARKER_ID` is 0, the id of
+`ARUCO_MIP_36h12_ID_0_A4.svg` in this repository, and entering marker mode
+selects it so the usual case is "type the printed edge length" rather than
+"find it in the list first". That is gated on the marker having **no measured
+size**, and the gate is the whole reason it is safe: with a size already
+stored, selecting it is enough to engage the follow loop, so pressing F3 would
+start flying on the spot. With no size the loop refuses it, and the
+pre-selection can only ever be a selection.
+
+The same honesty applies to the box's own affordance. It is armed when the loop
+is engaged or halted, **not** merely when a target is selected: a marker with
+no size leaves the phase `idle`, and offering to "stop" something that was
+never running was the box's one dishonest state.
 
 ### Two input rows that did not survive a narrow window
 

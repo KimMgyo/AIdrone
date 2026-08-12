@@ -714,8 +714,8 @@ export async function updateCheck(): Promise<AvailableUpdate | null> {
 
 /**
  * The marker dictionary's 250 payload codes, row-major 6x6 per id. Constant
- * for the life of the build, so a caller asks once; the panel's marker library
- * draws its glyphs from this rather than from a second copy of the table.
+ * for the life of the build, so a caller asks once; the panel matches its
+ * drawing pad against these and draws its roster glyphs from them.
  */
 export async function markerCodes(): Promise<readonly number[]> {
   return await invoke<number[]>("marker_codes");

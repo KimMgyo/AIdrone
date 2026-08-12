@@ -16,8 +16,18 @@ export interface ModeSelectorPanel {
 
 const ROW =
   "relative flex h-[44px] w-full items-center gap-[11px] rounded-[3px] border border-[#232931] bg-chip px-[12px] text-left hover:bg-[#1B2129] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
-const ACTIVE =
-  "pointer-events-none absolute inset-0 rounded-[3px] border border-accent bg-[rgba(91,200,245,.09)]";
+/**
+ * The selected row is drawn in the mode's OWN colour, not one house blue for
+ * all three. Each mode already declares that colour in `control-mode.ts` and
+ * everything else downstream honours it - the panel accent, the stage tag, the
+ * follow card - so a blue highlight over the marker mode was the one place the
+ * selection disagreed with what selecting it does.
+ */
+const ACTIVE: Record<(typeof CONTROL_MODES)[number]["color"], string> = {
+  accent: "pointer-events-none absolute inset-0 rounded-[3px] border border-accent bg-accent/10",
+  ok: "pointer-events-none absolute inset-0 rounded-[3px] border border-ok bg-ok/10",
+  warn: "pointer-events-none absolute inset-0 rounded-[3px] border border-warn bg-warn/10",
+};
 const INACTIVE = "pointer-events-none absolute inset-0 rounded-[3px] border border-transparent";
 
 /**
@@ -73,7 +83,7 @@ export function installModeSelector(
       const active = CONTROL_MODES[index].id === mode;
       buttons[index].setAttribute("aria-checked", String(active));
       cls(dots[index], active ? dotClasses[index] : inactiveDot);
-      cls(overlays[index], active ? ACTIVE : INACTIVE);
+      cls(overlays[index], active ? ACTIVE[CONTROL_MODES[index].color] : INACTIVE);
     }
   };
 

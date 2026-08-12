@@ -71,21 +71,19 @@ const LABEL: Record<FollowPhase, string> = {
  * picture rather than the panel. It is inert without a lock, because there is
  * nothing to pause.
  *
- * `role="button"` on a div rather than a real `<button>`: the release control
- * lives inside this box and nested buttons are invalid HTML. The keyboard
- * affordance is therefore explicit - Enter and Space, and a `tabindex` the
- * paint keeps in step with whether the box does anything.
+ * `role="button"` on a div rather than a real `<button>`: the box is a block of
+ * readouts, and wrapping those in a button would make every line inside it a
+ * button label. The keyboard affordance is therefore explicit - Enter and
+ * Space, and a `tabindex` the paint keeps in step with whether the box does
+ * anything.
  *
- * `clear` is optional because only the marker panel has anything to clear: a
- * person target is whoever is nearest, so there is no lock to release and a
- * button offering to would do nothing.
+ * There is no release control here. Both panels are the same shape now: a
+ * person target is whoever is nearest, and a marker target is dropped by
+ * choosing another one or removing it from the roster - so a button whose only
+ * job was to unset the marker lock was one control more than either panel
+ * needed.
  */
-export function installTargetBox(
-  mount: HTMLElement,
-  accent: TargetAccent,
-  follow: FollowPort,
-  clear?: () => void,
-): TargetBox {
+export function installTargetBox(mount: HTMLElement, accent: TargetAccent, follow: FollowPort): TargetBox {
   mount.innerHTML = `
     <div data-k="box" role="button" aria-label="추적 정지 / 재개" class="${IDLE_BOX[accent]}">
       <div class="flex items-center justify-between gap-[8px]">
@@ -93,11 +91,7 @@ export function installTargetBox(
           <div data-k="dot" class="${DOT} bg-dim3"></div>
           <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">TARGET</div>
         </div>
-        <div class="flex flex-none items-center gap-[6px]">
-          <div data-k="badge" class="${BADGE} border border-line3 text-dim2">정지</div>
-          <button data-k="clear" type="button" hidden
-            class="h-[19px] flex-none rounded-[2px] border border-line4 bg-key px-[6px] font-mono text-[9.5px] text-dim cursor-pointer hover:bg-btn hover:text-ink2">해제</button>
-        </div>
+        <div data-k="badge" class="${BADGE} border border-line3 text-dim2">정지</div>
       </div>
       <div data-k="title" class="mt-[6px] truncate font-mono text-[14px] ${TITLE_TONE[accent]}">--</div>
       <div data-k="command" class="${ROW} text-dim" hidden></div>
@@ -116,20 +110,20 @@ export function installTargetBox(
   const distance = must("[data-k=distance]", HTMLDivElement, mount);
   const power = must("[data-k=power]", HTMLDivElement, mount);
   const engine = must("[data-k=engine]", HTMLDivElement, mount);
-  const clearBtn = must("[data-k=clear]", HTMLButtonElement, mount);
   const hint = must("[data-k=hint]", HTMLDivElement, mount);
 
-  // `stopPropagation`, not `preventDefault`: releasing the lock must not also
-  // read as a click on the box that contains the button.
-  if (clear !== undefined) {
-    clearBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      clear();
-    });
+  /**
+   * Armed when the loop is actually engaged or halted - NOT merely when a
+   * target is selected. A marker with no measured size is a selection the
+   * follow loop refuses, so the phase stays `idle`, and offering to "stop"
+   * something that was never running was the box's one dishonest state.
+   */
+  function armed(): boolean {
+    return view.locked && state.phase !== "idle";
   }
 
   function toggle(): void {
-    if (!view.locked) return;
+    if (!armed()) return;
     if (state.phase === "halted") follow.resume();
     else follow.stop("paused");
   }
@@ -213,13 +207,12 @@ export function installTargetBox(
     // Manual deflection is printed here and nowhere else in this panel: the
     // number only means something next to the loop's own authority.
     text(power, `POWER ${state.maxRc} · 수동 ${DEFLECTION}`);
-    clearBtn.hidden = clear === undefined || !view.locked;
     // The affordance follows the capability exactly: a box that cannot pause
     // anything is not focusable, has no pointer, and says nothing about it.
-    const armed = view.locked;
-    box.tabIndex = armed ? 0 : -1;
-    hint.hidden = !armed;
-    if (armed) text(hint, state.phase === "halted" ? "박스를 눌러 추적 재개" : "박스를 눌러 추적 정지");
+    const live = armed();
+    box.tabIndex = live ? 0 : -1;
+    hint.hidden = !live;
+    if (live) text(hint, state.phase === "halted" ? "박스를 눌러 추적 재개" : "박스를 눌러 추적 정지");
   }
 
   const unsubscribe = follow.subscribe((next) => {

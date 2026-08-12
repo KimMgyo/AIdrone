@@ -499,9 +499,9 @@ fn node_present() -> bool {
     }
 }
 
-/// The 250 payload codes of the marker dictionary, for the panel's marker
-/// library. Read-only and constant for the life of the build, so the frontend
-/// asks once at boot; 36 bits each fits a JSON number exactly.
+/// The 250 payload codes of the marker dictionary, for the panel's 6x6 drawing
+/// pad and its roster glyphs. Read-only and constant for the life of the build,
+/// so the frontend asks once at boot; 36 bits each fits a JSON number exactly.
 #[tauri::command]
 fn marker_codes() -> Result<Vec<u64>, String> {
     crate::apriltag3::payload_codes()
