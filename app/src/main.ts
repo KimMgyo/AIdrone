@@ -29,7 +29,7 @@ if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
  *    only makes sense with all of it in view.
  */
 import type { ControlMode } from "./control-mode.ts";
-import { createNativeVisionAdapter, DEFAULT_MARKER_ID, markerMetrics } from "./lib/aruco.ts";
+import { createNativeVisionAdapter, markerMetrics } from "./lib/aruco.ts";
 import {
   ARUCO_DESIRED_SIZE,
   createFollowController,
@@ -285,7 +285,12 @@ function statusForMode(selectedMode: ControlMode): string {
 function setMode(nextMode: ControlMode): void {
   // Before anything else: the loop is steering toward a target that belongs to
   // the mode being left, and a mode switch is never a request to keep flying.
-  follow.stop("mode");
+  //
+  // Only on an actual change. `stop` latches now whether or not anything is
+  // locked, so firing it on the boot call - which sets the initial mode rather
+  // than leaving one - opened the app with autonomy already halted and the
+  // operator having to resume something they never stopped.
+  if (nextMode !== mode) follow.stop("mode");
   mode = nextMode;
   vision.setMode(mode);
   station.setMode(mode);
@@ -300,22 +305,10 @@ function setMode(nextMode: ControlMode): void {
     queueVisionMode(mode);
   }
 
-  // Entering marker mode pre-selects the marker this project prints, so the
-  // usual case is "type the printed edge length" rather than "find it in the
-  // list first". A mode change clears the previous lock, which is why this has
-  // to be re-applied here rather than seeded once.
-  //
-  // Strictly gated on the marker having NO measured size, and that gate is the
-  // whole reason this is safe: with a size stored, selecting it is enough to
-  // arm the follow loop, and pressing F3 would start flying on the spot. With
-  // no size the loop refuses it, so this can only ever be a selection.
-  if (
-    mode === "aruco" &&
-    markerSizes.get(DEFAULT_MARKER_ID) === null &&
-    vision.arucoSnapshot().known.some((entry) => entry.id === DEFAULT_MARKER_ID)
-  ) {
-    vision.setArucoTarget(DEFAULT_MARKER_ID);
-  }
+  // No marker is pre-selected. The roster starts empty and says so; a marker
+  // joins it by being detected or by being drawn, and the operator picks one.
+  // The selection then survives every later mode change, so this is a choice
+  // made once rather than a default guessed for them.
 }
 
 /** Serializes detector-mode requests so rapid F2/F3 changes cannot leave an

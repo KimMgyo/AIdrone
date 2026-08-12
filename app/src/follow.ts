@@ -370,11 +370,15 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
   let locked = false;
   let maxRc = config.maxRc;
   /**
-   * Set by `stop`, cleared only when the lock is released. Without it an
-   * emergency stop would last exactly one tick: the next vision event still
-   * carries the same lock, and the loop would re-engage on its own.
+   * The standing "do not fly" flag, and which decision set it.
+   *
+   * Independent of whether anything is locked, which is the whole point. An
+   * operator who stops the loop while the target happens to be out of frame
+   * means it to STAY stopped when the target comes back, and a halt that
+   * cleared itself the moment the lock lapsed was a loop that re-armed on its
+   * own. Only `resume()` clears it.
    */
-  let halted = false;
+  let stopped: FollowStopReason | null = null;
   let airborne: boolean | null = null;
   let loop = 0;
   let target: FollowTarget | null = null;
@@ -387,8 +391,8 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
   let moving = false;
 
   function phase(): FollowPhase {
+    if (stopped !== null) return "halted";
     if (!locked) return "idle";
-    if (halted) return "halted";
     const stale = lastDetectedAt === null ? Number.POSITIVE_INFINITY : now() - lastDetectedAt;
     return target !== null && stale < LOSS_NEUTRAL_MS ? "following" : "searching";
   }
@@ -446,7 +450,7 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
   }
 
   function tick(): void {
-    if (!locked || halted) return;
+    if (!locked || stopped !== null) return;
     const stale = lastDetectedAt === null ? Number.POSITIVE_INFINITY : now() - lastDetectedAt;
     if (target === null || stale >= LOSS_NEUTRAL_MS) {
       // The lock stays. The drone holds position on zeroes and picks the
@@ -476,9 +480,8 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
           if (modeSize !== wasSize) announce(null);
           return;
         }
-        // Releasing the lock is the operator's stop, and it also clears a halt
-        // so the next lock starts clean.
-        halted = false;
+        // Releasing the lock is not a resume: a stop the operator asked for
+        // outlives the target it was aimed at.
         lastDetectedAt = null;
         stopLoop();
         forceNeutral();
@@ -495,25 +498,26 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
     },
 
     stop(reason): void {
-      // A stop with nothing running is a no-op, not a latch. `setMode` fires
-      // one on every mode change including the very first, and latching there
-      // left the next lock halted before it had ever moved.
-      if (!locked || halted) return;
-      halted = true;
+      // Latches whether or not anything is locked. A stop is an instruction
+      // about what this loop may do next, not a comment on what it is doing
+      // now, and the operator pressing it while the target is out of frame is
+      // exactly the case that has to keep holding when the target returns.
+      if (stopped !== null) return;
+      stopped = reason;
       stopLoop();
       forceNeutral();
       announce(reason);
     },
 
     resume(): void {
-      if (!locked || !halted) return;
-      halted = false;
-      // The lock never went away, but the target's last sighting may have
-      // aged out while the loop was stopped. `tick()` decides which of those
-      // it is - following or searching - from the same staleness rule the
-      // running loop uses, so a resume cannot start by flying at a target
+      if (stopped === null) return;
+      stopped = null;
+      // The lock may have lapsed while the loop was stopped, and the target's
+      // last sighting may have aged out. `tick()` decides which of those it is
+      // - following, searching, or nothing to do at all - from the same rules
+      // the running loop uses, so a resume cannot start by flying at a target
       // nobody has seen for a minute.
-      if (loop === 0) loop = start(tick, RC_SEND_INTERVAL_MS);
+      if (locked && loop === 0) loop = start(tick, RC_SEND_INTERVAL_MS);
       // Announced after the tick, not before: `tick` announces its own state
       // with a null reason, which would swallow this one on the way past.
       tick();

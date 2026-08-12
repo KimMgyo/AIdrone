@@ -221,7 +221,7 @@ describe("createFollowController", () => {
     expect(h.lastReason()).toBe("released");
   });
 
-  test("an emergency stop stays stopped while the lock is still held", () => {
+  test("an emergency stop outlives the lock it was aimed at", () => {
     const h = harness();
     h.controller.update(true, at(860, 100), 150);
     h.sent.length = 0;
@@ -240,10 +240,40 @@ describe("createFollowController", () => {
     expect(h.sent).toEqual(["rc 0 0 0 0"]);
     expect(h.controller.state().phase).toBe("halted");
 
-    // Releasing and re-locking is the way back, and it is a human act.
+    // Nor may losing and regaining the lock. A halt used to clear itself on
+    // release, which meant an emergency stop lasted exactly as long as the
+    // target stayed in frame - the drone re-armed on its own the moment the
+    // operator's target came back. Only an explicit resume ends it.
     h.controller.update(false, null, 150);
     h.controller.update(true, at(860, 100), 150);
+    expect(h.controller.state().phase).toBe("halted");
+    // The release centres the sticks again, which is a stop putting another
+    // zero on the wire - never a deflection. That is the invariant worth
+    // asserting while halted, and counting neutrals would only pin the number
+    // of times the loop was told to stop.
+    expect(h.sent.every((command) => command === "rc 0 0 0 0")).toBe(true);
+
+    h.controller.resume();
     expect(h.controller.state().phase).toBe("following");
+  });
+
+  test("a stop latches with nothing locked, and holds when a target arrives", () => {
+    // The operator's own pause is reachable with the frame empty - the box is
+    // clickable whether or not anything is being followed - so a stop taken
+    // then has to survive the target turning up afterwards.
+    const h = harness();
+    h.controller.stop("paused");
+    expect(h.controller.state().phase).toBe("halted");
+
+    h.controller.update(true, at(860, 100), 150);
+    h.advance(100);
+    h.pump();
+    expect(h.sent).toEqual(["rc 0 0 0 0"]);
+    expect(h.controller.state().phase).toBe("halted");
+
+    h.controller.resume();
+    expect(h.controller.state().phase).toBe("following");
+    expect(h.sent.length).toBeGreaterThan(1);
   });
 
   test("a mode change stops it the same way", () => {

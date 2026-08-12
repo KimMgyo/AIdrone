@@ -12,18 +12,6 @@ import type {
 /** The only ArUco dictionary implemented by the native worker today. */
 export const NATIVE_ARUCO_DICTIONARY = "ARUCO_MIP_36h12";
 
-/**
- * The marker this project ships a print of - `ARUCO_MIP_36h12_ID_0_A4.svg` in
- * the repository root. Seeded onto the roster and selected when a session comes
- * up, so the common case needs no clicks at all.
- *
- * It arrives with no size, which is the whole reason seeding it is safe: the
- * follow loop refuses an unmeasured tag, so this is a selection and not an
- * armed autonomous flight. The operator types the printed edge length, and only
- * then can anything move.
- */
-export const DEFAULT_MARKER_ID = 0;
-
 export type ArucoMarker = VisionArucoMarker;
 export type PersonDetection = VisionPersonDetection;
 
@@ -198,19 +186,14 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
   setSessionLive(live: boolean): void {
     if (live === this.sessionLive) return;
     this.sessionLive = live;
+    // The roster and the selection belong to the session, and nothing else
+    // clears them: leaving marker mode and coming back finds the same marker
+    // still chosen. Safe because `stop("mode")` latches on the way out, so the
+    // loop is halted whatever it still has a lock on - the operator resumes it
+    // deliberately from the target box.
+    this.arucoKnown = [];
+    this.arucoTargetId = null;
     this.clearObservations();
-    // Seeded AFTER the reset, which nulls the target: a live session starts on
-    // the marker this project prints, already chosen. Not armed - see
-    // `DEFAULT_MARKER_ID` - just selected, so the common case is "type the edge
-    // length" rather than "find it in the list first".
-    //
-    // Only here, and deliberately not on every entry into marker mode. A mode
-    // change clears the lock, and re-seeding it there would hand the operator a
-    // freshly armed follow loop the moment they pressed F3 with a size already
-    // stored. Re-picking from the roster is one click on a row that is still
-    // sitting there.
-    this.arucoKnown = live ? [DEFAULT_MARKER_ID] : [];
-    this.arucoTargetId = live ? DEFAULT_MARKER_ID : null;
     this.notifyAll();
   }
 
@@ -377,17 +360,20 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
   }
 
   /**
-   * A mode change or a session end releases the marker lock. It used to
-   * survive, which was harmless while selection was presentation-only and is
-   * not now: the lock is the follow switch, and returning to a mode should
-   * never resume autonomous flight on a target the operator chose minutes ago.
+   * Observations only.
+   *
+   * The marker selection is NOT one, and used not to survive here: a mode
+   * change dropped the lock so returning to a mode could not resume autonomous
+   * flight on a target chosen minutes ago. That guarantee now comes from the
+   * loop itself - `stop("mode")` latches until an explicit resume, whatever it
+   * still holds a lock on - so the selection can stay and the operator keeps
+   * the marker they picked.
    */
   private clearObservations(): void {
     this.arucoStatus = null;
     this.personStatus = null;
     this.arucoEvent = null;
     this.personEvent = null;
-    this.arucoTargetId = null;
   }
 
   private notifyAll(): void {

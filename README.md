@@ -1153,24 +1153,39 @@ rather than a title.
 
 ### The box is the switch, and the roster outlives the frame
 
-Two controls, both of which used to be missing:
+**Tracking is a standing intention, and the TARGET box is its switch.** The box
+takes a click in every state, in both panels - `role="button"` on a div holding
+the readouts, with Enter and Space wired explicitly and `preventDefault` on
+Space so the panel does not scroll out from under the hand that meant to stop a
+drone. The only state it refuses is a detector fault, which is not the
+operator's to clear.
 
-**Clicking the TARGET box pauses and resumes the follow.** It is the control
-an operator reaches for while watching the picture, not the panel, so it is
-the whole box rather than a button inside it - `role="button"` on a div,
-because the release control lives in the same box and nested buttons are
-invalid HTML, with Enter and Space wired explicitly and `preventDefault` on
-Space so the panel does not scroll out from under the hand that meant to stop
-a drone. The box is inert without a lock: `tabindex` goes to `-1`, the hint
-line disappears, and the click handler returns early. `FollowPort` grew
-exactly two verbs for this - `stop("paused")` and `resume()` - narrowed so a
-panel can only cause the halt it can also undo; emergency and mode changes
-stay with the caller that owns them.
+That required `stop()` to change meaning. It used to no-op unless something was
+locked and to clear itself when the lock was released; both were wrong for a
+switch. An empty frame is exactly when an operator most wants to be sure the
+loop is off before the target walks back in, and a halt that cleared itself on
+release meant an **emergency stop lasted only as long as the target stayed in
+frame** - the loop re-armed on its own the moment the target came back. So a
+stop now latches whatever is locked, and only `resume()` ends it. Both halves
+are pinned by tests: `an emergency stop outlives the lock it was aimed at` and
+`a stop latches with nothing locked, and holds when a target arrives`.
+
+Two consequences on screen. `idle` reads **대상 없음** rather than 정지 and is
+drawn red like the rest of a live loop, because nothing being followed is not
+the same as the loop being off - 중단됨 is now the only state drawn as off. And
+**leaving a mode halts the loop**, which is what an operator switching menus
+means; the halt is only skipped on the boot call that sets the initial mode
+rather than leaving one, because opening the app already halted would ask them
+to resume something they never stopped.
+
+`FollowPort` grew exactly two verbs for this - `stop("paused")` and `resume()` -
+narrowed so a panel can only cause the halt it can also undo; emergency and
+mode changes stay with the caller that owns them.
 
 The `resume` notice needed one ordering fix that a test caught rather than a
-session did: `tick()` announces its own state with a null reason, so
-announcing `"resumed"` before it meant subscribers never saw the reason at
-all, and routing it with the stop reasons would have made the timeline read
+session did: `tick()` announces its own state with a null reason, so announcing
+`"resumed"` before it meant subscribers never saw the reason at all, and routing
+it with the stop reasons would have made the timeline read
 `자동 추적 정지 · 추적 재개`. It now announces after the tick and is handled
 beside `locked`, where it belongs.
 
@@ -1181,8 +1196,8 @@ shows `화면에 없음` in place of geometry while it is not in view - printing
 last frame's position would be a place the drone is not looking. Forgetting the
 marker being followed releases it first: the loop may not keep steering at an
 id the operator has just taken off the list. The section is therefore called
-`MARKERS · n` with a `화면 n` count beside it rather than `DETECTED`, because it
-is no longer only what the camera can see. Each row is chipped with the
+`MARKERS · n`, not `DETECTED`, because it is no longer only what the camera can
+see. Each row is chipped with the
 marker's own **pattern** rather than its number, which is what an operator
 holding a print matches by looking; the digits are on the line beside it.
 
@@ -1194,12 +1209,25 @@ off a print. `marker_codes()` returns the row-major 6x6 bits straight out of
 from, so both the pad's matching and the roster's glyphs come from the table
 the detector decodes rather than a second hand-drawn one.
 
+The bit order is not assumed. It was checked against the printed artefact:
+`ARUCO_MIP_36h12_ID_0.svg`'s white payload cells are exactly
+`code 0xd2b63a09d` read row-major with bit 35 at the top left, which is what
+the pad packs and what `drawMarker` paints. (The print lives in the sibling
+`tellovoice` repository, not this one.)
+
 Two decisions inside the matcher:
 
-- **Exact match only.** A near miss is not offered as a suggestion, because the
-  point of drawing the pattern is to name the marker in the operator's hand,
-  and "did you mean ID 91" is how you follow the wrong print. Verified: one
-  wrong cell out of 36 reads `일치 없음`, not a neighbour.
+- **The tolerance is the detector's own, two bits.** Exact-match-only was the
+  first attempt and it was unusable: 36 cells read off a print in a room, and
+  one mis-clicked corner left a dead button with nothing to go on. AprilTag is
+  built with `BITS_CORRECTED = 2` in `apriltag3.rs`, so a drawing within two
+  bits names exactly the marker the detector would name off the same print -
+  which is a tolerance this app already flies on, not a guess. Anything looser
+  is refused, and the distance is printed when there is one, because a drawing
+  that needed correcting is either a mis-click or a print worth a second look.
+  Measured: 0, 1 and 2 wrong cells all resolve to `ID 91` (the last two as
+  `ID 91 · 2비트 차이`); 3 wrong cells reads `일치 없음` and the button goes
+  dead.
 - **All four rotations are tried**, because the same physical marker read
   upside down is the same marker and demanding the dictionary's canonical
   orientation would fail honest input. Verified: all four rotations of ID 91
@@ -1216,19 +1244,18 @@ typed in. What changed is only which markers may be chosen - `setArucoTarget`
 now requires an id on the roster instead of one in the current frame, which is
 also what lets a lock survive the target leaving view.
 
-**The shipped print is pre-selected.** `DEFAULT_MARKER_ID` is 0, the id of
-`ARUCO_MIP_36h12_ID_0_A4.svg` in this repository, and entering marker mode
-selects it so the usual case is "type the printed edge length" rather than
-"find it in the list first". That is gated on the marker having **no measured
-size**, and the gate is the whole reason it is safe: with a size already
-stored, selecting it is enough to engage the follow loop, so pressing F3 would
-start flying on the spot. With no size the loop refuses it, and the
-pre-selection can only ever be a selection.
+**No marker is pre-selected.** An empty roster says `등록된 마커 없음`, and a
+marker joins it by being detected or drawn. The selection an operator then
+makes **survives every later mode change**, so it is a choice made once rather
+than a default guessed for them - and it is safe to keep precisely because the
+halt below latches on the way out of the mode.
 
-The same honesty applies to the box's own affordance. It is armed when the loop
-is engaged or halted, **not** merely when a target is selected: a marker with
-no size leaves the phase `idle`, and offering to "stop" something that was
-never running was the box's one dishonest state.
+One smaller thing in the same pass: **the selected mode row is drawn in that
+mode's own colour** - blue for keyboard, green for person, yellow for markers.
+Each mode already declares its colour in `control-mode.ts` and everything else
+downstream honours it (the panel accent, the stage tag, the target box), so a
+single house blue on the selection was the one place the highlight disagreed
+with what selecting it does.
 
 ### Two input rows that did not survive a narrow window
 

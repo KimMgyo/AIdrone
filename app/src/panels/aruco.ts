@@ -21,16 +21,15 @@ export interface ArucoPanel {
 }
 
 /**
- * A state word, not a sentence. The roster is empty when nothing has been seen
- * and nothing has been picked from the library, which is a different reading
- * from a detector that is not running.
+ * A state word, not a sentence. An empty roster is a different reading from a
+ * detector that is not running, and neither is a sentence about what to do.
  */
 function emptyRosterNote(state: ArucoVisionState): string | null {
   if (!state.active) return "비활성";
   if (state.observation?.state === "error") return "AprilTag 3 오류";
   if (state.known.length > 0) return null;
   if (state.recvEpochUs === null) return "결과 대기";
-  return "감지 없음 · 아래에서 마커를 골라 추가할 수 있습니다";
+  return "등록된 마커 없음";
 }
 
 type MarkerRow = {
@@ -313,24 +312,42 @@ function rotateGrid(grid: readonly boolean[]): boolean[] {
 }
 
 /**
- * The id whose codeword the drawn grid IS, or null.
+ * The dictionary id the drawn grid names, with how many cells it took to get
+ * there.
  *
- * Exact match only. A near miss is not offered as a suggestion, because the
- * whole point of drawing the pattern is to name the marker the operator is
- * holding, and "did you mean ID 91" is how you follow the wrong print. All
- * four rotations are tried, though: the same physical marker read upside down
- * is the same marker, and demanding the operator guess the dictionary's
- * canonical orientation would fail honest input.
+ * Not exact-match-only, which is where this started and which was unusable: 36
+ * cells read off a print in a room, and one mis-clicked corner left the operator
+ * with a dead button and nothing to go on. The tolerance is the DETECTOR's own -
+ * AprilTag is built with `BITS_CORRECTED = 2` in `apriltag3.rs`, so a drawing
+ * within two bits of a codeword names exactly the marker the detector would
+ * name off the same print. Anything looser is a guess and is refused.
+ *
+ * All four rotations are tried: the same physical marker read upside down is the
+ * same marker, and demanding the dictionary's canonical orientation would fail
+ * honest input.
  */
-function matchGrid(grid: readonly boolean[], codes: readonly number[]): number | null {
+const PAD_MATCH_BITS = 2;
+
+function matchGrid(grid: readonly boolean[], codes: readonly number[]): { id: number; distance: number } | null {
+  let best: { id: number; distance: number } | null = null;
   let candidate = grid;
   for (let turn = 0; turn < 4; turn++) {
     const code = packGrid(candidate);
-    const id = codes.indexOf(code);
-    if (id >= 0) return id;
+    for (const [id, entry] of codes.entries()) {
+      let distance = 0;
+      for (let bit = 0; bit < MIP_CELLS * MIP_CELLS; bit++) {
+        const mask = 2 ** bit;
+        if (Math.floor(code / mask) % 2 !== Math.floor(entry / mask) % 2) distance++;
+        if (distance > PAD_MATCH_BITS) break;
+      }
+      if (distance <= PAD_MATCH_BITS && (best === null || distance < best.distance)) {
+        best = { id, distance };
+      }
+      if (best?.distance === 0) return best;
+    }
     candidate = rotateGrid(candidate);
   }
-  return null;
+  return best;
 }
 
 export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): ArucoPanel {
@@ -343,15 +360,12 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
            being drawn below, and stays until it is removed. -->
       <div data-k="target-mount"></div>
 
-      <div class="flex items-center justify-between">
-        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKERS · <span data-k="count">0</span></div>
-        <div class="font-mono text-[10px] text-dim3">화면 <span data-k="visible">0</span></div>
-      </div>
+      <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKERS · <span data-k="count">0</span></div>
       <div data-k="marker-note" class="font-mono text-[10.5px] leading-[1.6] text-dim2" hidden></div>
       <div data-k="marker-list" class="flex flex-col gap-[6px]"></div>
 
       <div class="flex items-center justify-between border-t border-line2 pt-[9px]">
-        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKER 그리기</div>
+        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">MARKER DRAW</div>
         <div class="font-mono text-[10px] text-dim3">${NATIVE_ARUCO_DICTIONARY}</div>
       </div>
       <div class="flex items-start gap-[10px]">
@@ -374,7 +388,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   `;
 
   const count = must("[data-k=count]", HTMLSpanElement, mount);
-  const visible = must("[data-k=visible]", HTMLSpanElement, mount);
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
   const pad = must("[data-k=pad]", HTMLDivElement, mount);
@@ -385,7 +398,7 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   /** The drawn payload, and the codebook once Rust has answered. */
   const grid: boolean[] = new Array<boolean>(MIP_CELLS * MIP_CELLS).fill(false);
   let codes: readonly number[] = [];
-  let drawn: number | null = null;
+  let drawn: { id: number; distance: number } | null = null;
 
   const cells = Array.from({ length: MIP_CELLS * MIP_CELLS }, (_, index) => {
     const cell = document.createElement("button");
@@ -400,7 +413,13 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   function paintPad(): void {
     for (const [index, cell] of cells.entries()) cls(cell, grid[index] ? PAD_CELL_ON : PAD_CELL_OFF);
     drawn = codes.length === 0 ? null : matchGrid(grid, codes);
-    text(padId, drawn === null ? "일치 없음" : `ID ${drawn}`);
+    // The distance is printed when there is one, because a drawing that needed
+    // correcting is worth knowing about: it is either a mis-clicked cell or a
+    // print this operator should look at again.
+    text(
+      padId,
+      drawn === null ? "일치 없음" : drawn.distance === 0 ? `ID ${drawn.id}` : `ID ${drawn.id} · ${drawn.distance}비트 차이`,
+    );
     cls(padId, `font-mono text-[13px] ${drawn === null ? "text-dim" : "text-warn"}`);
     padAdd.disabled = drawn === null;
   }
@@ -422,7 +441,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     });
 
     text(count, String(next.known.length));
-    text(visible, String(next.markers.length));
     reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes, codes);
   };
 
@@ -442,8 +460,8 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
       // stays unfollowable, which the target box reports as 크기 필요 until a
       // size is typed into its row.
       if (drawn === null) return;
-      deps.vision.addArucoMarker(drawn);
-      if (deps.sizes.get(drawn) !== null) deps.vision.setArucoTarget(drawn);
+      deps.vision.addArucoMarker(drawn.id);
+      if (deps.sizes.get(drawn.id) !== null) deps.vision.setArucoTarget(drawn.id);
       return;
     }
 

@@ -58,8 +58,13 @@ const TITLE_TONE: Record<TargetAccent, string> = {
   ok: "text-ok",
 };
 
+/**
+ * `idle` reads 대상 없음, not 정지. With tracking a standing intention, an
+ * empty frame is the loop waiting rather than the loop being off - and 중단됨
+ * is now the only word that means off.
+ */
 const LABEL: Record<FollowPhase, string> = {
-  idle: "정지",
+  idle: "대상 없음",
   following: "추적 중",
   searching: "대상 탐색",
   halted: "중단됨",
@@ -113,13 +118,17 @@ export function installTargetBox(mount: HTMLElement, accent: TargetAccent, follo
   const hint = must("[data-k=hint]", HTMLDivElement, mount);
 
   /**
-   * Armed when the loop is actually engaged or halted - NOT merely when a
-   * target is selected. A marker with no measured size is a selection the
-   * follow loop refuses, so the phase stays `idle`, and offering to "stop"
-   * something that was never running was the box's one dishonest state.
+   * Always clickable, in both panels.
+   *
+   * Tracking is a standing intention, not a thing that only exists while
+   * something is in frame: an empty frame is the case where an operator most
+   * wants to be sure the loop is off before the target walks back in. So the
+   * box takes a click whatever the phase, and `stop("paused")` latches with
+   * nothing locked - see `follow.ts`. The one state where it does nothing is a
+   * detector fault, which is not the operator's to clear.
    */
   function armed(): boolean {
-    return view.locked && state.phase !== "idle";
+    return view.trouble === null;
   }
 
   function toggle(): void {
@@ -187,9 +196,13 @@ export function installTargetBox(mount: HTMLElement, accent: TargetAccent, follo
           cls(badge, `${BADGE} border border-line4 text-dim`);
           break;
         case "idle":
-          cls(box, IDLE_BOX[accent]);
-          cls(dot, `${DOT} bg-dim3`);
-          cls(badge, `${BADGE} border border-line3 text-dim2`);
+          // Red, not grey. Nothing is being followed because nothing is there,
+          // which is not the same as the loop being off, and a grey box in that
+          // state read as "stopped" to the one person who needed to know it was
+          // not. 중단됨 above is the only state drawn as off.
+          cls(box, `${BOX} border-alert/40 bg-alert/5`);
+          cls(dot, `${DOT} bg-alert/70`);
+          cls(badge, `${BADGE} border border-alert/45 text-alert2`);
       }
     }
 
@@ -207,10 +220,12 @@ export function installTargetBox(mount: HTMLElement, accent: TargetAccent, follo
     // Manual deflection is printed here and nowhere else in this panel: the
     // number only means something next to the loop's own authority.
     text(power, `POWER ${state.maxRc} · 수동 ${DEFLECTION}`);
-    // The affordance follows the capability exactly: a box that cannot pause
-    // anything is not focusable, has no pointer, and says nothing about it.
+    // The affordance follows the capability exactly: only a detector fault
+    // leaves the box unable to do anything, and only then does it stop looking
+    // like something to press.
     const live = armed();
     box.tabIndex = live ? 0 : -1;
+    box.style.cursor = live ? "pointer" : "default";
     hint.hidden = !live;
     if (live) text(hint, state.phase === "halted" ? "박스를 눌러 추적 재개" : "박스를 눌러 추적 정지");
   }
