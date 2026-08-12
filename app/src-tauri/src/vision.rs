@@ -15,10 +15,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use aruco_rs::core::detector::Detector;
-use aruco_rs::core::dictionary::{Dictionary, DICTIONARY_ARUCO_MIP_36H12};
-use aruco_rs::simd::dispatch::NativeCV;
-use aruco_rs::ImageBuffer;
 use ort::session::Session;
 use ort::value::TensorRef;
 use serde::Serialize;
@@ -33,13 +29,17 @@ use crate::track::{Observation, Tracker, TrackerConfig};
 /// mailbox drops frames whenever a detector runs long, so overshooting the
 /// stream's own rate costs nothing but a busier worker thread.
 ///
-/// Measured per frame at 960x720 on this bench: AprilTag 3 1-4 ms plus
-/// `aruco-rs` 3-7 ms for the marker pair, and 20.1 ms for one YOLO26n
-/// inference. Marker analysis therefore runs on essentially every decoded
-/// frame; person inference is capped at 10 Hz, which is a fifth of a core.
+/// Measured per frame at 960x720 on this bench: AprilTag 3 1-4 ms for the
+/// markers, and 20.1 ms for one YOLO26n inference. Marker analysis therefore
+/// runs on essentially every decoded frame; person inference is capped at
+/// 10 Hz, which is a fifth of a core. The retired `aruco-rs` baseline cost a
+/// further 3-7 ms of every marker frame.
+///
+/// The marker hamming bound is not here any more either: AprilTag carries its
+/// own, `BITS_CORRECTED = 2` in `apriltag3.rs`, which is stricter than the
+/// `tau = 5` the baseline dictionary was pinned at.
 const ARUCO_SAMPLE_INTERVAL: Duration = Duration::from_millis(33);
 const PERSON_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
-const ARUCO_MAX_HAMMING_DISTANCE: usize = 5;
 const YOLO_INPUT_EDGE: usize = 640;
 const YOLO_PERSON_CLASS: f32 = 0.0;
 /// The model-side floor is only the tracker's association floor. The 0.40
@@ -328,34 +328,21 @@ struct ArucoMarker {
     corners: [Point; 4],
 }
 
-/// Engine order is the wire contract: index 0 is the primary whose markers the
-/// UI selects and overlays, index 1 is the comparison row. AprilTag 3 leads
-/// because a 596-frame live capture had it detect the print in every frame the
-/// `aruco-rs` baseline did, plus 298 more, at half the per-frame cost.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum ArucoEngine {
-    Apriltag3,
-    ArucoRs,
-}
-
+/// One engine, flat on the event, exactly like the person event beside it.
+///
+/// There used to be two: AprilTag 3 and the `aruco-rs` baseline it replaced,
+/// run over the same frame and published as an ordered pair so the panel could
+/// show them side by side. That comparison did its job and is over - a
+/// 596-frame live capture had AprilTag 3 detect the print in every frame the
+/// baseline did, plus 298 more, at half the per-frame cost - and keeping the
+/// loser running cost 3-7 ms of every marker frame to render a row nobody
+/// acts on. The crate stays as the source of truth for the MIP codebook that
+/// `apriltag3.rs` derives its family from; only the detector is gone.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum ArucoEngineState {
     Ready,
     Error,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ArucoEngineResult {
-    engine: ArucoEngine,
-    family: &'static str,
-    state: ArucoEngineState,
-    analysis_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-    markers: Vec<ArucoMarker>,
 }
 
 /// The wire shape of one tracked person. `track_id` is the identity the UI
@@ -400,7 +387,12 @@ enum VisionEvent {
         recv_epoch_us: u64,
         width: u32,
         height: u32,
-        engines: [ArucoEngineResult; 2],
+        family: &'static str,
+        state: ArucoEngineState,
+        analysis_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        markers: Vec<ArucoMarker>,
     },
     Person {
         recv_epoch_us: u64,
@@ -428,14 +420,6 @@ fn worker_loop(
     events: Channel<serde_json::Value>,
     model_path: Option<PathBuf>,
 ) {
-    let mut dictionary = Dictionary::new(&DICTIONARY_ARUCO_MIP_36H12);
-    // The upstream MIP dictionary's published tau is 12.  This station uses
-    // the established conservative strict comparison `distance < 5`, matching
-    // the former desktop detector and refusing weak near-matches.
-    dictionary.tau = ARUCO_MAX_HAMMING_DISTANCE;
-    let aruco_detector = Detector::new(&dictionary, NativeCV);
-    // An unavailable comparison engine must not disable the established
-    // `aruco-rs` observation. Its fresh per-frame error row makes that clear.
     let mut apriltag_detector = AprilTag3Detector::new();
 
     let mut decoder = H264Decoder::new()
@@ -545,44 +529,13 @@ fn worker_loop(
                 let started = Instant::now();
                 match selected_mode {
                     VisionMode::Aruco => {
-                        let image = ImageBuffer {
-                            data: rgba,
-                            width,
-                            height,
-                        };
-                        let aruco_started = Instant::now();
-                        let aruco_markers = aruco_detector
-                            .detect(&image)
-                            .into_iter()
-                            .map(|marker| ArucoMarker {
-                                id: marker.id,
-                                hamming_distance: marker.hamming_distance,
-                                decision_margin: None,
-                                corners: marker.corners.map(|point| Point {
-                                    x: point.x,
-                                    y: point.y,
-                                }),
-                            })
-                            .collect();
-                        let aruco_result = ArucoEngineResult {
-                            engine: ArucoEngine::ArucoRs,
-                            family: APRILTAG_FAMILY_NAME,
-                            state: ArucoEngineState::Ready,
-                            analysis_ms: aruco_started.elapsed().as_millis() as u64,
-                            detail: None,
-                            markers: aruco_markers,
-                        };
-
                         let apriltag_started = Instant::now();
-                        let apriltag_result = match apriltag_detector.as_mut() {
+                        let (state, detail, markers) = match apriltag_detector.as_mut() {
                             Ok(detector) => match detector.detect(width, height, rgba) {
-                                Ok(markers) => ArucoEngineResult {
-                                    engine: ArucoEngine::Apriltag3,
-                                    family: APRILTAG_FAMILY_NAME,
-                                    state: ArucoEngineState::Ready,
-                                    analysis_ms: apriltag_started.elapsed().as_millis() as u64,
-                                    detail: None,
-                                    markers: markers
+                                Ok(found) => (
+                                    ArucoEngineState::Ready,
+                                    None,
+                                    found
                                         .into_iter()
                                         .map(|marker| ArucoMarker {
                                             id: marker.id,
@@ -594,24 +547,10 @@ fn worker_loop(
                                             }),
                                         })
                                         .collect(),
-                                },
-                                Err(detail) => ArucoEngineResult {
-                                    engine: ArucoEngine::Apriltag3,
-                                    family: APRILTAG_FAMILY_NAME,
-                                    state: ArucoEngineState::Error,
-                                    analysis_ms: apriltag_started.elapsed().as_millis() as u64,
-                                    detail: Some(detail),
-                                    markers: Vec::new(),
-                                },
+                                ),
+                                Err(detail) => (ArucoEngineState::Error, Some(detail), Vec::new()),
                             },
-                            Err(detail) => ArucoEngineResult {
-                                engine: ArucoEngine::Apriltag3,
-                                family: APRILTAG_FAMILY_NAME,
-                                state: ArucoEngineState::Error,
-                                analysis_ms: 0,
-                                detail: Some(detail.clone()),
-                                markers: Vec::new(),
-                            },
+                            Err(detail) => (ArucoEngineState::Error, Some(detail.clone()), Vec::new()),
                         };
                         if ready_mode != Some(VisionMode::Aruco) {
                             emit(
@@ -619,9 +558,7 @@ fn worker_loop(
                                 VisionEvent::Status {
                                     mode: VisionMode::Aruco,
                                     state: VisionState::Ready,
-                                    detail: Some(
-                                        "ARUCO_MIP_36h12 AprilTag 3 + aruco-rs comparison".into(),
-                                    ),
+                                    detail: Some("ARUCO_MIP_36h12 AprilTag 3".into()),
                                 },
                             );
                             ready_mode = Some(VisionMode::Aruco);
@@ -632,7 +569,11 @@ fn worker_loop(
                                 recv_epoch_us: frame.recv_epoch_us,
                                 width,
                                 height,
-                                engines: [apriltag_result, aruco_result],
+                                family: APRILTAG_FAMILY_NAME,
+                                state,
+                                analysis_ms: apriltag_started.elapsed().as_millis() as u64,
+                                detail,
+                                markers,
                             },
                         );
                     }
@@ -1143,84 +1084,41 @@ mod tests {
         out
     }
 
-    fn baseline_detects_id_zero(detector: &Detector<NativeCV>, rgba: &[u8]) -> bool {
-        detector
-            .detect(&ImageBuffer {
-                data: rgba,
-                width: FIXTURE_WIDTH as u32,
-                height: FIXTURE_HEIGHT as u32,
-            })
-            .iter()
-            .any(|marker| marker.id == 0)
-    }
-
-    fn baseline_detector(dictionary: &Dictionary) -> Detector<'_, NativeCV> {
-        Detector::new(dictionary, NativeCV)
-    }
-
-    fn strict_mip_dictionary() -> Dictionary {
-        let mut dictionary = Dictionary::new(&DICTIONARY_ARUCO_MIP_36H12);
-        dictionary.tau = ARUCO_MAX_HAMMING_DISTANCE;
-        dictionary
-    }
-
     #[test]
-    fn native_marker_detectors_find_exact_mip_marker() {
+    fn the_marker_detector_finds_an_exact_mip_marker() {
         let rgba = mip_id_zero_frame(70);
-        let dictionary = strict_mip_dictionary();
-        let detector = baseline_detector(&dictionary);
-        assert!(detector
-            .detect(&ImageBuffer {
-                data: &rgba,
-                width: FIXTURE_WIDTH as u32,
-                height: FIXTURE_HEIGHT as u32,
-            })
-            .iter()
-            .any(|marker| marker.id == 0 && marker.hamming_distance == 0));
-
         let mut apriltag = AprilTag3Detector::new().expect("AprilTag 3 detector");
-        let april_markers = apriltag
+        let markers = apriltag
             .detect(FIXTURE_WIDTH as u32, FIXTURE_HEIGHT as u32, &rgba)
             .expect("AprilTag 3 MIP detection");
-        assert!(april_markers
+        assert!(markers
             .iter()
             .any(|marker| marker.id == 0 && marker.hamming_distance == 0));
     }
 
-    /// The whole reason the comparison engine exists: on the same frame, at a
-    /// marker size and blur the drone actually produces, AprilTag 3 still
-    /// decodes ID 0 where the `aruco-rs` baseline reports nothing. If this
-    /// ever stops holding, the A/B surface has lost its purpose.
+    /// Why AprilTag 3 is the one that ships, kept as a property of the shipped
+    /// detector rather than of a comparison that no longer runs: at a marker
+    /// size and blur the drone actually produces, it still decodes ID 0. The
+    /// `aruco-rs` baseline this was measured against lost exactly this frame,
+    /// which is what retired it.
     #[test]
-    fn apriltag_decodes_a_blurred_marker_the_baseline_drops() {
-        let sharp = mip_id_zero_frame(8);
-        let blurred = box_blur(&sharp, 4);
-        let dictionary = strict_mip_dictionary();
-        let baseline = baseline_detector(&dictionary);
+    fn the_marker_detector_survives_a_blurred_marker() {
+        let blurred = box_blur(&mip_id_zero_frame(8), 4);
         let mut apriltag = AprilTag3Detector::new().expect("AprilTag 3 detector");
-
-        assert!(
-            baseline_detects_id_zero(&baseline, &sharp),
-            "a 64 px sharp marker must still be the baseline's easy case"
-        );
-        assert!(
-            !baseline_detects_id_zero(&baseline, &blurred),
-            "baseline is expected to lose this frame; the margin claim is measured, not assumed"
-        );
         assert!(
             apriltag
                 .detect(FIXTURE_WIDTH as u32, FIXTURE_HEIGHT as u32, &blurred)
                 .expect("AprilTag 3 blurred detection")
                 .iter()
                 .any(|marker| marker.id == 0),
-            "AprilTag 3 must keep the marker the baseline drops"
+            "a 64 px marker blurred by 4 px must still decode"
         );
     }
 
-    /// Neither engine may invent a marker in a bordered, grainy scene - the
-    /// false-positive risk that pinned the baseline's tau at 5, not 12.
+    /// The detector may not invent a marker in a bordered, grainy scene - the
+    /// false-positive risk a marker lock is only safe against because of it.
     #[test]
-    fn neither_engine_invents_a_marker_in_clutter() {
+    fn the_marker_detector_invents_nothing_in_clutter() {
         let mut seed = 0x2545_F491_4F6C_DD1D_u64;
         let mut next = move || {
             seed ^= seed << 13;
@@ -1252,9 +1150,6 @@ mod tests {
             }
         }
 
-        let dictionary = strict_mip_dictionary();
-        let baseline = baseline_detector(&dictionary);
-        assert!(!baseline_detects_id_zero(&baseline, &rgba));
         assert!(AprilTag3Detector::new()
             .expect("AprilTag 3 detector")
             .detect(FIXTURE_WIDTH as u32, FIXTURE_HEIGHT as u32, &rgba)

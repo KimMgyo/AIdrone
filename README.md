@@ -91,7 +91,7 @@ firmware/          PlatformIO, ESP32-S3 (WEMOS LOLIN S3 Mini, N16R8)
   src/bench.cpp    synthetic UDP generator (no drone needed)
   src/main.cpp     console + 1 Hz stats
 app/               Tauri desktop client (Rust sockets + WebView2 UI)
-  src-tauri/       tello.rs (SDK/UDP), video.rs (reassembly + stamp), h264.rs (native decode), vision.rs (bounded ArUco/YOLO worker), apriltag3.rs (AprilTag 3 comparison engine), lib.rs
+  src-tauri/       tello.rs (SDK/UDP), video.rs (reassembly + stamp), h264.rs (native decode), vision.rs (bounded marker/YOLO worker), apriltag3.rs (the marker engine), lib.rs
   src/transport.ts typed Tauri command/event bridge
   src/render.ts    WebCodecs decode -> canvas
   src/lib/aruco.ts native-observation state, target selection, and UI listeners
@@ -1195,11 +1195,10 @@ detector drops stale analysis work instead of delaying UDP ingress, rendering,
 SDK commands, or RC packets.
 
 Sample intervals are floors, chosen against measured cost at 960x720 on this
-bench: the marker pair costs 1-4 ms (AprilTag 3) plus 3-7 ms (`aruco-rs`), so
-ArUco analysis runs at **33 ms** - every frame of a 30 fps stream. One YOLO26n
-inference costs **20.1 ms**, so person analysis is capped at **100 ms**, a fifth
-of a core. The whole app measured **16% of one core** replaying a 30 fps capture
-in ArUco mode.
+bench: AprilTag 3 costs 1-4 ms a frame, so marker analysis runs at **33 ms** -
+every frame of a 30 fps stream. One YOLO26n inference costs **20.1 ms**, so
+person analysis is capped at **100 ms**, a fifth of a core. The whole app
+measured **16% of one core** replaying a 30 fps capture in marker mode.
 
 The worker emits small observation events only: exact `ARUCO_MIP_36h12`
 IDs/corners/Hamming distance, or YOLO26n person boxes/confidence from CPU ONNX
@@ -1440,26 +1439,29 @@ never saw their reference turns a freeze into a screen of green blocks.
 `VideoDecoder` through error, refuses to rebuild on deltas, and asserts the
 rebuild happens on the next key frame.
 
-### Two marker engines on the same frame
+### One marker engine, and the measurement that retired the other
 
-ArUco mode runs **two** detectors over the exact same decoded RGBA frame and
-emits both outcomes in one event (`engines: [apriltag3, aruco-rs]`). **Index 0
-is the primary**: the only engine selection, the overlay, and the target state
-follow. Index 1 is the comparison row.
+Marker mode runs **AprilTag 3** (`apriltag-sys` 0.4.0, wrapped in
+`src-tauri/src/apriltag3.rs`), and nothing else. Its codebook is *derived at
+construction* from `aruco_rs::DICTIONARY_ARUCO_MIP_36H12`, repacked from that
+crate's row-major 6x6 payload order into AprilTag's perimeter-first
+`tagArucoMIP36h12` bit order, so it decodes the same 250 IDs off the same
+print. No vendored code table, no second dictionary to keep in sync - which is
+why `aruco-rs` is still a dependency for that one constant, with its `simd`
+feature and its detector gone.
 
-- **AprilTag 3** (`apriltag-sys` 0.4.0, wrapped in `src-tauri/src/apriltag3.rs`)
-  - the primary. Its codebook is *derived at construction* from
-  `aruco_rs::DICTIONARY_ARUCO_MIP_36H12`, repacked from the crate's row-major
-  6x6 payload order into AprilTag's perimeter-first `tagArucoMIP36h12` bit
-  order, so both engines decode the identical 250 IDs off the identical print.
-  No vendored code table, no second dictionary to keep in sync.
-- **`aruco-rs` 0.1.0** - the comparison, at a strict `distance < 5` instead of
-  the dictionary's published tau of 12. It was the primary until the live
-  capture below.
+It ran as a pair for a while: both detectors over the exact same decoded RGBA
+frame, published as `engines: [apriltag3, aruco-rs]`, with the panel showing
+two rows so the two could be compared on identical input. That comparison is
+the reason the primary changed, and once it had answered, keeping the loser
+running cost **3-7 ms of every marker frame** to render a row nobody acted on.
+The pair, the ordered wire contract, the decoder that enforced the ordering and
+the panel's A/B rows are all gone; the event is now flat, in the same shape as
+the person event beside it. What the comparison measured is below, because it
+is the evidence for the engine that shipped.
 
-Nothing about the flight path changed: both rows are presentation data. An
-engine that fails reports its own `state: "error"` row for that frame with an
-empty marker list, and the panel keeps showing the other one.
+A detector that fails reports `state: "error"` with an empty marker list for
+that frame, and the target box shows the fault instead of the follow phase.
 
 #### Why AprilTag 3 leads
 
@@ -1497,8 +1499,13 @@ halves: **3.2-3.5 ms** for `aruco-rs` versus **1.2-1.6 ms** for AprilTag 3
 (which decimates by 2 before quad detection), and zero false positives from
 either across 20 marker-free frames of 120 random rectangles plus grain - the
 extra reach is not a looser acceptance.
-`apriltag_decodes_a_blurred_marker_the_baseline_drops` and
-`neither_engine_invents_a_marker_in_clutter` in `vision.rs` pin both halves.
+
+Those two properties are still pinned by tests, but as properties of the
+**shipped** detector rather than of a comparison that no longer runs:
+`the_marker_detector_survives_a_blurred_marker` and
+`the_marker_detector_invents_nothing_in_clutter` in `vision.rs`. The hamming
+bound went the same way - it was the baseline dictionary's `tau = 5`, and the
+shipped tolerance is AprilTag's own `BITS_CORRECTED = 2`, which is stricter.
 
 ### Benching without a drone
 
@@ -1738,8 +1745,8 @@ decode into Rust on Linux, which trades the WebCodecs architecture for it.
    caught measuring nothing.
 
    **What it buys, measured.** The A/B, paired and back to back on a freshly
-   powered drone, with `connect()` timed from the button click because there
-   is no auto-connect:
+   powered drone, with `connect()` timed from the click of the connect button
+   this build still had:
 
    | previous session ended by | connect | `gap max` | outcome |
    |---|---|---|---|
@@ -1833,15 +1840,15 @@ Verified on hardware (WEMOS LOLIN S3 Mini + Windows 11 + a real Tello):
     YOLO26n end to end and produced four native boxes in 23 ms. Both modes
     rendered their overlays and emitted no SDK or RC command; keyboard takeoff
     remained suppressed outside manual mode.
-14. **The two marker engines decode the same print, and AprilTag 3 is strictly
-    ahead on the real camera.** Over 596 consecutive live Tello frames it
-    detected 594 to `aruco-rs`'s 296, with **zero** frames won by `aruco-rs`,
-    at roughly half the per-frame cost and no false positives from either on
+14. **The shipped marker engine was chosen by measurement, not preference.**
+    Over 596 consecutive live Tello frames AprilTag 3 detected 594 to the
+    `aruco-rs` baseline's 296, with **zero** frames won by the baseline, at
+    roughly half the per-frame cost and no false positives from either on
     cluttered marker-free frames. The discriminator is apparent marker size
-    (~120 px for `aruco-rs`), not blur: its misses were measurably *sharper*
-    than its hits. AprilTag 3 is therefore the primary engine; `aruco-rs`
-    remains on screen as the comparison row. See *Two marker engines on the
-    same frame*.
+    (~120 px for the baseline), not blur: its misses were measurably *sharper*
+    than its hits. The baseline detector has since been removed - it cost 3-7 ms
+    of every marker frame to publish a row nobody acted on. See *One marker
+    engine, and the measurement that retired the other*.
 
 What still cannot be reconciled the way the USB leg is: **the Wi-Fi leg's own
 loss.** `q = tx + drop` closes the USB accounting because both ends count. The

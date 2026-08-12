@@ -1,6 +1,5 @@
 import type { ControlMode } from "../control-mode.ts";
 import type {
-  VisionArucoEngineResult,
   VisionArucoEvent,
   VisionArucoMarker,
   VisionEvent,
@@ -15,11 +14,6 @@ export const NATIVE_ARUCO_DICTIONARY = "ARUCO_MIP_36h12";
 
 export type ArucoMarker = VisionArucoMarker;
 export type PersonDetection = VisionPersonDetection;
-
-/** Index 0 is the primary engine: the only one selection and overlay follow. */
-function primaryArucoResult(event: VisionArucoEvent | null): VisionArucoEngineResult<"apriltag3"> | null {
-  return event?.engines[0] ?? null;
-}
 
 /**
  * Centre and apparent edge length of a marker, from its corners alone. Shared
@@ -68,13 +62,14 @@ export type ArucoVisionState = Readonly<{
   dictionaryName: typeof NATIVE_ARUCO_DICTIONARY;
   /** The verbatim native status for the active detector mode, if it sent one. */
   status: VisionStatusEvent | null;
-  /** Current-frame markers from the primary engine (AprilTag 3). */
+  /** Current-frame markers, when the detector reported a healthy frame. */
   markers: readonly ArucoMarker[];
   recvEpochUs: number | null;
   frameSize: Readonly<{ width: number; height: number }> | null;
   analysisMs: number | null;
-  /** The complete, ordered same-frame A/B result; never a rolling history. */
-  comparison: VisionArucoEvent | null;
+  /** The verbatim last frame, so a panel can read a detector error's detail
+   *  without this class deciding what to do about it. */
+  observation: VisionArucoEvent | null;
   target: ArucoTarget;
 }>;
 
@@ -198,8 +193,8 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
   }
 
   setArucoTarget(id: number | null): void {
-    const primary = primaryArucoResult(this.arucoEvent);
-    const markers = primary?.state === "ready" ? primary.markers : [];
+    const event = this.arucoEvent;
+    const markers = event?.state === "ready" ? event.markers : [];
     if (id !== null && !markers.some((marker) => marker.id === id)) return;
     if (id === this.arucoTargetId) return;
     this.arucoTargetId = id;
@@ -209,8 +204,7 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
   arucoSnapshot(): ArucoVisionState {
     const event = this.arucoEvent;
     const active = this.active("aruco");
-    const primary = primaryArucoResult(event);
-    const markers = active && primary?.state === "ready" ? primary.markers : [];
+    const markers = active && event?.state === "ready" ? event.markers : [];
     const marker = this.arucoTargetId === null ? null : (markers.find((candidate) => candidate.id === this.arucoTargetId) ?? null);
     return {
       active,
@@ -219,12 +213,12 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
       markers,
       recvEpochUs: active ? (event?.recvEpochUs ?? null) : null,
       frameSize: active && event !== null ? { width: event.width, height: event.height } : null,
-      analysisMs: active && primary?.state === "ready" ? primary.analysisMs : null,
-      comparison: active ? event : null,
+      analysisMs: active && event?.state === "ready" ? event.analysisMs : null,
+      observation: active ? event : null,
       target: {
         id: this.arucoTargetId,
         marker,
-        state: this.arucoTargetState(active, primary, marker),
+        state: this.arucoTargetState(active, active ? event : null, marker),
       },
     };
   }
@@ -271,14 +265,14 @@ class NativeVisionStateAdapter implements NativeVisionAdapter {
 
   private arucoTargetState(
     active: boolean,
-    primary: VisionArucoEngineResult<"apriltag3"> | null,
+    event: VisionArucoEvent | null,
     marker: ArucoMarker | null,
   ): ArucoTargetState {
     const state: VisionStatusState | null = this.arucoStatus?.state ?? null;
     if (!active || state === "inactive") return "inactive";
-    if (state === "error" || primary?.state === "error") return "error";
+    if (state === "error" || event?.state === "error") return "error";
     if (marker !== null) return "detected";
-    if (primary?.state === "ready") return this.arucoTargetId === null ? "unselected" : "searching";
+    if (event?.state === "ready") return this.arucoTargetId === null ? "unselected" : "searching";
     return "waitingFrame";
   }
 

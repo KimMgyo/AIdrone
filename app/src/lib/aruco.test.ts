@@ -16,47 +16,31 @@ function marker(id: number, decisionMargin?: number): VisionArucoMarker {
   };
 }
 
-function comparison(
-  primaryMarkers: readonly VisionArucoMarker[],
-  arucoMarkers: readonly VisionArucoMarker[],
-): VisionArucoEvent {
+function observation(markers: readonly VisionArucoMarker[]): VisionArucoEvent {
   return {
     kind: "aruco",
     recvEpochUs: 42,
     width: 960,
     height: 720,
-    engines: [
-      {
-        engine: "apriltag3",
-        family: "ARUCO_MIP_36h12",
-        state: "ready",
-        analysisMs: 1,
-        markers: primaryMarkers,
-      },
-      {
-        engine: "aruco-rs",
-        family: "ARUCO_MIP_36h12",
-        state: "ready",
-        analysisMs: 2,
-        markers: arucoMarkers,
-      },
-    ],
+    family: "ARUCO_MIP_36h12",
+    state: "ready",
+    analysisMs: 1,
+    markers,
   };
 }
 
-describe("NativeVisionStateAdapter ArUco comparisons", () => {
-  test("projects only the AprilTag 3 result into selection and overlay state", () => {
+describe("NativeVisionStateAdapter ArUco observations", () => {
+  test("only a marker in the current frame is selectable, and geometry never outlives it", () => {
     const vision = createNativeVisionAdapter();
     vision.setSessionLive(true);
     vision.setMode("aruco");
-    vision.accept(comparison([marker(7, 36.5)], [marker(8)]));
+    vision.accept(observation([marker(7, 36.5)]));
 
     let snapshot = vision.arucoSnapshot();
     expect(snapshot.markers.map((candidate) => candidate.id)).toEqual([7]);
     expect(snapshot.markers[0]?.decisionMargin).toBe(36.5);
-    expect(snapshot.comparison?.engines[1].markers.map((candidate) => candidate.id)).toEqual([8]);
 
-    // A marker only the comparison engine sees is not selectable.
+    // A marker this frame does not carry cannot be locked.
     vision.setArucoTarget(8);
     expect(vision.arucoSnapshot().target.id).toBeNull();
 
@@ -65,15 +49,16 @@ describe("NativeVisionStateAdapter ArUco comparisons", () => {
     expect(snapshot.target.id).toBe(7);
     expect(snapshot.target.marker?.id).toBe(7);
 
-    // A later frame without that marker must not retain the old geometry.
-    vision.accept(comparison([], [marker(7)]));
+    // A later frame without that marker must not retain the old geometry. The
+    // lock survives; the position does not.
+    vision.accept(observation([]));
     snapshot = vision.arucoSnapshot();
     expect(snapshot.markers).toEqual([]);
     expect(snapshot.target.marker).toBeNull();
     expect(snapshot.target.state).toBe("searching");
   });
 
-  test("projects a primary-engine error as an empty current result", () => {
+  test("projects a detector error as an empty current result", () => {
     const vision = createNativeVisionAdapter();
     vision.setSessionLive(true);
     vision.setMode("aruco");
@@ -82,29 +67,17 @@ describe("NativeVisionStateAdapter ArUco comparisons", () => {
       recvEpochUs: 99,
       width: 960,
       height: 720,
-      engines: [
-        {
-          engine: "apriltag3",
-          family: "ARUCO_MIP_36h12",
-          state: "error",
-          analysisMs: 3,
-          detail: "AprilTag failed",
-          markers: [],
-        },
-        {
-          engine: "aruco-rs",
-          family: "ARUCO_MIP_36h12",
-          state: "ready",
-          analysisMs: 2,
-          markers: [marker(7)],
-        },
-      ],
+      family: "ARUCO_MIP_36h12",
+      state: "error",
+      analysisMs: 3,
+      detail: "AprilTag failed",
+      markers: [],
     });
 
     const snapshot = vision.arucoSnapshot();
     expect(snapshot.markers).toEqual([]);
     expect(snapshot.analysisMs).toBeNull();
     expect(snapshot.target.state).toBe("error");
-    expect(snapshot.comparison?.engines[0].detail).toBe("AprilTag failed");
+    expect(snapshot.observation?.detail).toBe("AprilTag failed");
   });
 });

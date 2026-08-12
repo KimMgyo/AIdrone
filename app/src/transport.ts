@@ -50,38 +50,34 @@ export type VisionPoint = Readonly<{ x: number; y: number }>;
 export type VisionArucoMarker = Readonly<{
   id: number;
   hammingDistance: number;
-  /** AprilTag 3's per-detection decode confidence; `aruco-rs` omits it. */
+  /** AprilTag 3's per-detection decode confidence. */
   decisionMargin?: number;
   corners: readonly [VisionPoint, VisionPoint, VisionPoint, VisionPoint];
 }>;
 
-export const VISION_ARUCO_ENGINES = ["apriltag3", "aruco-rs"] as const;
-export type VisionArucoEngine = (typeof VISION_ARUCO_ENGINES)[number];
 export const VISION_ARUCO_ENGINE_STATES = ["ready", "error"] as const;
 export type VisionArucoEngineState = (typeof VISION_ARUCO_ENGINE_STATES)[number];
 
-export type VisionArucoEngineResult<E extends VisionArucoEngine = VisionArucoEngine> = Readonly<{
-  engine: E;
+/**
+ * One engine, flat on the event, in the same shape as the person event.
+ *
+ * This used to be `engines: [apriltag3, aruco-rs]` - an ordered same-frame
+ * pair, with the second there only so the panel could show the baseline
+ * AprilTag 3 replaced. The comparison is over and the baseline detector is
+ * gone, so the pair, its ordering rule and the decoder that enforced it went
+ * with it.
+ */
+export type VisionArucoEvent = Readonly<{
+  kind: "aruco";
+  recvEpochUs: number;
+  width: number;
+  height: number;
   family: "ARUCO_MIP_36h12";
   state: VisionArucoEngineState;
   analysisMs: number;
   /** An error has no current markers; ready never carries a stale detail. */
   detail?: string;
   markers: readonly VisionArucoMarker[];
-}>;
-
-export type VisionArucoEngines = readonly [
-  VisionArucoEngineResult<"apriltag3">,
-  VisionArucoEngineResult<"aruco-rs">,
-];
-
-export type VisionArucoEvent = Readonly<{
-  kind: "aruco";
-  recvEpochUs: number;
-  width: number;
-  height: number;
-  /** Ordered, same-frame outcomes. Index 0 is the primary presentation engine. */
-  engines: VisionArucoEngines;
 }>;
 
 export type VisionPersonDetection = Readonly<{
@@ -415,30 +411,27 @@ function decodeVisionMarker(value: unknown): VisionArucoMarker | null {
     : { id, hammingDistance, decisionMargin, corners: [first, second, third, fourth] };
 }
 
-function visionArucoEngine(value: unknown): value is VisionArucoEngine {
-  return typeof value === "string" && VISION_ARUCO_ENGINES.includes(value as VisionArucoEngine);
-}
-
 function visionArucoEngineState(value: unknown): value is VisionArucoEngineState {
   return typeof value === "string" && VISION_ARUCO_ENGINE_STATES.includes(value as VisionArucoEngineState);
 }
 
-function decodeVisionArucoEngineResult<E extends VisionArucoEngine>(
-  value: unknown,
-  expectedEngine: E,
-): VisionArucoEngineResult<E> | null {
-  const rec = record(value);
-  if (
-    rec === null ||
-    rec.engine !== expectedEngine ||
-    !visionArucoEngine(rec.engine) ||
-    rec.family !== "ARUCO_MIP_36h12" ||
-    !visionArucoEngineState(rec.state)
-  ) {
+/**
+ * The marker-specific half; the caller has already validated the fields every
+ * observation event shares.
+ *
+ * Every rejection here refuses a whole frame, deliberately. A marker id the UI
+ * can lock a follow loop onto has to come from a payload that is entirely well
+ * formed - a duplicate id, an error carrying markers, or a ready result
+ * carrying a stale detail all mean the producer is not the one this decoder was
+ * written against.
+ */
+function decodeVisionAruco(
+  rec: Record<string, unknown>,
+  common: { recvEpochUs: number; width: number; height: number; analysisMs: number },
+): VisionArucoEvent | null {
+  if (rec.family !== "ARUCO_MIP_36h12" || !visionArucoEngineState(rec.state) || !Array.isArray(rec.markers)) {
     return null;
   }
-  const analysisMs = nonnegativeFinite(rec.analysisMs);
-  if (analysisMs === null || !Array.isArray(rec.markers)) return null;
 
   const markers: VisionArucoMarker[] = [];
   const markerIds = new Set<number>();
@@ -451,30 +444,10 @@ function decodeVisionArucoEngineResult<E extends VisionArucoEngine>(
 
   if (rec.state === "error") {
     if (typeof rec.detail !== "string" || rec.detail.trim().length === 0 || markers.length !== 0) return null;
-    return {
-      engine: expectedEngine,
-      family: "ARUCO_MIP_36h12",
-      state: "error",
-      analysisMs,
-      detail: rec.detail,
-      markers,
-    };
+    return { kind: "aruco", ...common, family: "ARUCO_MIP_36h12", state: "error", detail: rec.detail, markers };
   }
   if (rec.detail !== undefined) return null;
-  return {
-    engine: expectedEngine,
-    family: "ARUCO_MIP_36h12",
-    state: "ready",
-    analysisMs,
-    markers,
-  };
-}
-
-function decodeVisionArucoEngines(value: unknown): VisionArucoEngines | null {
-  if (!Array.isArray(value) || value.length !== VISION_ARUCO_ENGINES.length) return null;
-  const primary = decodeVisionArucoEngineResult(value[0], "apriltag3");
-  const comparison = decodeVisionArucoEngineResult(value[1], "aruco-rs");
-  return primary === null || comparison === null ? null : [primary, comparison];
+  return { kind: "aruco", ...common, family: "ARUCO_MIP_36h12", state: "ready", markers };
 }
 
 function decodeVisionPersonDetection(value: unknown): VisionPersonDetection | null {
@@ -521,18 +494,16 @@ export function decodeVisionEvent(msg: unknown): VisionEvent | null {
       : { kind: "status", mode: rec.mode, state: rec.state, detail: rec.detail };
   }
 
+  // Both observation events carry these four, so they are validated once here
+  // and the per-kind decoders below only see values that already hold.
   const recvEpochUs = nonnegativeSafeInteger(rec.recvEpochUs);
   const width = positiveSafeInteger(rec.width);
   const height = positiveSafeInteger(rec.height);
-  if (recvEpochUs === null || width === null || height === null) return null;
-
-  if (rec.kind === "aruco") {
-    const engines = decodeVisionArucoEngines(rec.engines);
-    return engines === null ? null : { kind: "aruco", recvEpochUs, width, height, engines };
-  }
-
   const analysisMs = nonnegativeFinite(rec.analysisMs);
-  if (analysisMs === null) return null;
+  if (recvEpochUs === null || width === null || height === null || analysisMs === null) return null;
+  const common = { recvEpochUs, width, height, analysisMs };
+
+  if (rec.kind === "aruco") return decodeVisionAruco(rec, common);
 
   if (rec.kind === "person") {
     if (!Array.isArray(rec.detections)) return null;

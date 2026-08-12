@@ -5,7 +5,6 @@ import {
   type NativeVisionAdapter,
 } from "../lib/aruco.ts";
 import type { FollowPort } from "../follow.ts";
-import type { VisionArucoEngineResult, VisionArucoEngineState } from "../transport.ts";
 import { markerTargetPx, parseMarkerSize, type MarkerSizes } from "../marker-size.ts";
 import { installTargetBox } from "./target-box.ts";
 import { cls, must, text } from "../ui.ts";
@@ -20,68 +19,11 @@ export interface ArucoPanel {
   dispose(): void;
 }
 
-type EnginePanelState = "waiting" | VisionArucoEngineState;
-
-type EngineView = Readonly<{
-  card: HTMLDivElement;
-  badge: HTMLDivElement;
-  timing: HTMLDivElement;
-  ids: HTMLDivElement;
-  detail: HTMLDivElement;
-}>;
-
-const ENGINE_STATE_LABEL: Record<EnginePanelState, string> = {
-  waiting: "결과 대기",
-  ready: "READY",
-  error: "ERROR",
-};
-
-const ENGINE_TONE: Record<EnginePanelState, { card: string; badge: string }> = {
-  waiting: {
-    card: "border-line2 bg-sunken",
-    badge: "border border-line3 text-dim2",
-  },
-  ready: {
-    card: "border-line3 bg-raised",
-    badge: "border border-line4 text-ink2",
-  },
-  error: {
-    card: "border-alert/45 bg-alert/10",
-    badge: "border border-alert/45 text-alert2",
-  },
-};
-
-/** Ids with the two numbers that qualify them: hamming, and AprilTag's own
- *  decision margin. aruco-rs publishes no margin, so it simply has none. */
-function engineSummary(result: VisionArucoEngineResult): string {
-  if (result.markers.length === 0) return "없음";
-  return result.markers
-    .map((marker) => {
-      const margin =
-        result.engine === "aruco-rs" || marker.decisionMargin === undefined ? "" : ` · M ${marker.decisionMargin.toFixed(0)}`;
-      return `ID ${marker.id} · H${marker.hammingDistance}${margin}`;
-    })
-    .join(" / ");
-}
-
-function paintEngine(view: EngineView, result: VisionArucoEngineResult | null): void {
-  const state: EnginePanelState = result?.state ?? "waiting";
-  const tone = ENGINE_TONE[state];
-  cls(view.card, `rounded-[3px] border px-[9px] py-[7px] ${tone.card}`);
-  cls(view.badge, `flex-none rounded-[2px] px-[5px] py-[1px] font-mono text-[8.5px] tracking-[.1em] ${tone.badge}`);
-  text(view.badge, ENGINE_STATE_LABEL[state]);
-  text(view.timing, result === null ? "--" : `${result.analysisMs.toFixed(1)} ms`);
-  text(view.ids, result === null || result.state === "error" ? "--" : engineSummary(result));
-  const detail = result?.state === "error" ? result.detail : undefined;
-  view.detail.hidden = detail === undefined;
-  if (detail !== undefined) text(view.detail, detail);
-}
-
 /** A state word, not a sentence: the empty list is a reading like any other. */
 function emptyMarkerNote(state: ArucoVisionState): string | null {
   if (!state.active) return "비활성";
   if (state.recvEpochUs === null) return "결과 대기";
-  if (state.comparison?.engines[0].state === "error") return "AprilTag 3 오류";
+  if (state.observation?.state === "error") return "AprilTag 3 오류";
   if (state.markers.length === 0) return "감지 없음";
   return null;
 }
@@ -261,9 +203,7 @@ function arucoTrouble(state: ArucoVisionState): string | null {
   if (state.status?.state === "error") return "오류";
   if (state.status?.state === "inactive") return "비활성";
   if (state.status?.state === "waitingFrame") return "프레임 대기";
-  // The per-engine rows below carry the detail; the badge only says which of
-  // the two engines is the one that failed.
-  if (state.comparison?.engines[0].state === "error") return "AprilTag 3 오류";
+  if (state.observation?.state === "error") return "AprilTag 3 오류";
   if (state.recvEpochUs === null) return "결과 대기";
   return null;
 }
@@ -271,35 +211,14 @@ function arucoTrouble(state: ArucoVisionState): string | null {
 export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): ArucoPanel {
   mount.innerHTML = `
     <section class="flex h-full min-h-0 flex-col gap-[10px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="ArUco marker detector">
-      <!-- Same two sections as the person panel: who is being followed, and
-           what was seen. The A/B engine rows sit under the list because they
-           are evidence about the detection, not about the target. -->
+      <!-- The same two sections as the person panel: who is being followed,
+           and what was seen. Nothing else - the A/B engine rows that used to
+           sit here went with the comparison engine they existed to show. -->
       <div data-k="target-mount"></div>
 
       <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · <span data-k="count">0</span></div>
       <div data-k="marker-note" class="font-mono text-[10.5px] text-dim2" hidden></div>
       <div data-k="marker-list" class="flex flex-col gap-[6px]"></div>
-
-      <div class="flex flex-col gap-[5px] border-t border-line2 pt-[9px]">
-        <div data-k="engine-apriltag-card" class="rounded-[3px] border">
-          <div class="flex items-baseline gap-[7px] font-mono text-[10px] leading-[1.5]">
-            <div class="w-[62px] flex-none tracking-[.1em] text-ink2">APRILTAG3</div>
-            <div data-k="engine-apriltag-time" class="w-[48px] flex-none text-ink">--</div>
-            <div data-k="engine-apriltag-ids" class="min-w-0 flex-1 truncate text-dim">--</div>
-            <div data-k="engine-apriltag-badge"></div>
-          </div>
-          <div data-k="engine-apriltag-detail" hidden class="mt-[5px] break-words font-mono text-[9px] leading-[1.45] text-alert2"></div>
-        </div>
-        <div data-k="engine-aruco-card" class="rounded-[3px] border">
-          <div class="flex items-baseline gap-[7px] font-mono text-[10px] leading-[1.5]">
-            <div class="w-[62px] flex-none tracking-[.1em] text-ink2">ARUCO-RS</div>
-            <div data-k="engine-aruco-time" class="w-[48px] flex-none text-ink">--</div>
-            <div data-k="engine-aruco-ids" class="min-w-0 flex-1 truncate text-dim">--</div>
-            <div data-k="engine-aruco-badge"></div>
-          </div>
-          <div data-k="engine-aruco-detail" hidden class="mt-[5px] break-words font-mono text-[9px] leading-[1.45] text-alert2"></div>
-        </div>
-      </div>
     </section>
   `;
 
@@ -307,20 +226,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
   const markerRowNodes = new Map<number, MarkerRow>();
-  const arucoEngine: EngineView = {
-    card: must("[data-k=engine-aruco-card]", HTMLDivElement, mount),
-    badge: must("[data-k=engine-aruco-badge]", HTMLDivElement, mount),
-    timing: must("[data-k=engine-aruco-time]", HTMLDivElement, mount),
-    ids: must("[data-k=engine-aruco-ids]", HTMLDivElement, mount),
-    detail: must("[data-k=engine-aruco-detail]", HTMLDivElement, mount),
-  };
-  const apriltagEngine: EngineView = {
-    card: must("[data-k=engine-apriltag-card]", HTMLDivElement, mount),
-    badge: must("[data-k=engine-apriltag-badge]", HTMLDivElement, mount),
-    timing: must("[data-k=engine-apriltag-time]", HTMLDivElement, mount),
-    ids: must("[data-k=engine-apriltag-ids]", HTMLDivElement, mount),
-    detail: must("[data-k=engine-apriltag-detail]", HTMLDivElement, mount),
-  };
 
   let current = deps.vision.arucoSnapshot();
   const target = installTargetBox(must("[data-k=target-mount]", HTMLDivElement, mount), "warn", deps.follow, () =>
@@ -342,8 +247,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
 
     text(count, String(next.markers.length));
     reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes);
-    paintEngine(apriltagEngine, next.comparison?.engines[0] ?? null);
-    paintEngine(arucoEngine, next.comparison?.engines[1] ?? null);
   };
 
   const onClick = (event: MouseEvent): void => {

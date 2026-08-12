@@ -33,11 +33,14 @@ serde_json = "1"
 #     (1). Pinned rather than tracking master so bindgen output stays reproducible.
 # `format` is needed internally by ffmpeg-next's scaler module.
 ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", rev = "3751e2800d5d2f0215d69031285aadebac5db8fc", default-features = false, features = ["codec", "format", "software-scaling", "non-exhaustive-enums"] }
-# Native detector parity with the former JS path. `simd` selects the crate's
-# x86-64 native implementation instead of its scalar dispatcher.
-aruco-rs = { version = "=0.1.0", features = ["simd"] }
-# AprilTag 3's raw ABI is wrapped locally so the current MIP codebook stays
-# identical to the existing `aruco-rs` baseline.
+# Kept for ONE constant: `DICTIONARY_ARUCO_MIP_36H12`, the source of truth
+# `apriltag3.rs` derives its AprilTag family from. Its detector was the
+# baseline AprilTag 3 replaced and no longer runs, so the `simd` feature that
+# selected the detector's x86-64 path is gone too. The alternative to this
+# dependency is duplicating 250 codewords, which is worse.
+aruco-rs = "=0.1.0"
+# AprilTag 3's raw ABI is wrapped locally so the shipped MIP codebook stays
+# identical to the list above.
 apriltag-sys = "=0.4.0"
 # `download-binaries` statically links pyke's runtime, whose glibc 2.38
 # baseline cannot link on Ubuntu 22.04. The official 1.28.0 CPU libraries are

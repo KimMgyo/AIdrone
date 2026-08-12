@@ -31,7 +31,10 @@
  *                   needs hands on the aircraft
  *   ?bat=14         hold the battery here (colour thresholds are 30 / 15)
  */
-import { VISION_ARUCO_ENGINES } from "../transport.ts";
+// Imports nothing any more: the flat marker event is plain JSON. The marker is
+// still needed because `declare global` below only works in a module, and this
+// file is loaded for its side effects alone.
+export {};
 
 type Handler = (args: Record<string, unknown>) => unknown;
 
@@ -245,13 +248,10 @@ function arucoEvent(t: number): unknown {
     recvEpochUs: Date.now() * 1000,
     width: WIDTH,
     height: HEIGHT,
-    engines: VISION_ARUCO_ENGINES.map((engine) => ({
-      engine,
-      family: "ARUCO_MIP_36h12",
-      state: "ready",
-      analysisMs: engine === "apriltag3" ? 1.4 : 2.6,
-      markers: [engine === "apriltag3" ? { ...marker, decisionMargin: 62.5 } : marker],
-    })),
+    family: "ARUCO_MIP_36h12",
+    state: "ready",
+    analysisMs: 1.4,
+    markers: [{ ...marker, decisionMargin: 62.5 }],
   };
 }
 

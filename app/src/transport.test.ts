@@ -15,62 +15,50 @@ function marker(id: number, decisionMargin?: number): Record<string, unknown> {
   };
 }
 
-function arucoComparison(): Record<string, unknown> {
+function arucoFrame(): Record<string, unknown> {
   return {
     kind: "aruco",
     recvEpochUs: 42,
     width: 960,
     height: 720,
-    engines: [
-      {
-        engine: "apriltag3",
-        family: "ARUCO_MIP_36h12",
-        state: "ready",
-        analysisMs: 1.25,
-        markers: [marker(7, 37.75)],
-      },
-      {
-        engine: "aruco-rs",
-        family: "ARUCO_MIP_36h12",
-        state: "ready",
-        analysisMs: 2.5,
-        markers: [marker(8)],
-      },
-    ],
+    family: "ARUCO_MIP_36h12",
+    state: "ready",
+    analysisMs: 1.25,
+    markers: [marker(7, 37.75)],
   };
 }
 
-describe("decodeVisionEvent ArUco comparisons", () => {
-  test("accepts exactly one ordered, same-frame result from each engine", () => {
-    const event = decodeVisionEvent(arucoComparison());
-    if (event?.kind !== "aruco") throw new Error("expected an ArUco comparison event");
+describe("decodeVisionEvent ArUco frames", () => {
+  test("accepts a well-formed marker observation", () => {
+    const event = decodeVisionEvent(arucoFrame());
+    if (event?.kind !== "aruco") throw new Error("expected an ArUco event");
 
-    expect(event.engines[0].engine).toBe("apriltag3");
-    expect(event.engines[0].analysisMs).toBe(1.25);
-    expect(event.engines[0].markers.map((candidate) => candidate.id)).toEqual([7]);
-    expect(event.engines[0].markers[0]?.decisionMargin).toBe(37.75);
-    expect(event.engines[1].engine).toBe("aruco-rs");
-    expect(event.engines[1].analysisMs).toBe(2.5);
-    expect(event.engines[1].markers.map((candidate) => candidate.id)).toEqual([8]);
-    expect(event.engines[1].markers[0]?.decisionMargin).toBeUndefined();
+    expect(event.state).toBe("ready");
+    expect(event.analysisMs).toBe(1.25);
+    expect(event.markers.map((candidate) => candidate.id)).toEqual([7]);
+    expect(event.markers[0]?.decisionMargin).toBe(37.75);
   });
 
-  test("rejects reordered engines and stale-looking error payloads", () => {
-    const reordered = arucoComparison();
-    const engines = reordered.engines as Record<string, unknown>[];
-    [engines[0], engines[1]] = [engines[1]!, engines[0]!];
-    expect(decodeVisionEvent(reordered)).toBeNull();
-
-    const errorWithMarker = arucoComparison();
-    const errorEngine = (errorWithMarker.engines as Record<string, unknown>[])[0]!;
-    errorEngine.state = "error";
-    errorEngine.detail = "detector failed";
+  test("refuses the whole frame rather than a plausible-looking marker", () => {
+    // An error result carrying markers, and a healthy one carrying a stale
+    // detail, both mean the producer is not the one this decoder was written
+    // against - and a marker id here can lock a follow loop.
+    const errorWithMarker = arucoFrame();
+    errorWithMarker.state = "error";
+    errorWithMarker.detail = "detector failed";
     expect(decodeVisionEvent(errorWithMarker)).toBeNull();
 
-    const readyWithDetail = arucoComparison();
-    const readyEngine = (readyWithDetail.engines as Record<string, unknown>[])[1]!;
-    readyEngine.detail = "previous-frame failure";
+    const readyWithDetail = arucoFrame();
+    readyWithDetail.detail = "previous-frame failure";
     expect(decodeVisionEvent(readyWithDetail)).toBeNull();
+
+    const duplicateIds = arucoFrame();
+    duplicateIds.markers = [marker(7, 1), marker(7, 2)];
+    expect(decodeVisionEvent(duplicateIds)).toBeNull();
+
+    const wrongFamily = arucoFrame();
+    wrongFamily.family = "ARUCO_ORIGINAL";
+    expect(decodeVisionEvent(wrongFamily)).toBeNull();
   });
 });
 
