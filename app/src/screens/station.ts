@@ -16,7 +16,7 @@
  * both give their space straight back to the stage through the same measure.
  */
 import type { ControlMode } from "../control-mode.ts";
-import { must, style, text } from "../ui.ts";
+import { mmss, must, style, text } from "../ui.ts";
 
 /** Every live cell in the shell, in one shape. Panels own their own state; this
  *  is only the chrome around them. */
@@ -372,10 +372,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       cell.bat.className = `font-mono text-[13px] ${batTone}`;
 
       const flight = finite(m.flightS);
-      text(
-        cell.flight,
-        flight === null ? MISSING : `${Math.floor(flight / 60)}:${String(Math.floor(flight) % 60).padStart(2, "0")}`,
-      );
+      text(cell.flight, flight === null ? MISSING : mmss(flight));
 
       text(cell.status, known(m.status));
       const rx = finite(m.rxPktsPerSec);

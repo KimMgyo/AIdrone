@@ -69,9 +69,9 @@ export function installLanding(
               명령·상태·영상 소켓을 열어 Tello 응답을 직접 확인합니다.
             </div>
           </div>
+          <!-- The addresses live in LINK SETTINGS, all four of them, next to
+               the button that uses them. Only the SDK line has no other home. -->
           <div class="font-mono text-[11px] text-dim2 text-right leading-[1.95]">
-            <div>NODE&nbsp;&nbsp;&nbsp;<span data-k="h-node">--</span></div>
-            <div>TELLO&nbsp;&nbsp;<span data-k="h-tello">--</span></div>
             <div>SDK&nbsp;&nbsp;&nbsp;&nbsp;Tello 2.0</div>
           </div>
         </div>
@@ -158,8 +158,6 @@ export function installLanding(
     state: q("e-state", HTMLDivElement),
     video: q("e-video", HTMLDivElement),
     node: q("e-node", HTMLDivElement),
-    hNode: q("h-node", HTMLSpanElement),
-    hTello: q("h-tello", HTMLSpanElement),
   };
 
   probeBtn.addEventListener("click", deps.onProbe);
@@ -217,8 +215,6 @@ export function installLanding(
       text(ends.state, endpoints?.state ?? "--");
       text(ends.video, endpoints?.video ?? "--");
       text(ends.node, endpoints?.node ?? "--");
-      text(ends.hNode, endpoints?.node ?? "--");
-      text(ends.hTello, endpoints?.tello ?? "--");
 
       style(probing, "display", m.probing ? "flex" : "none");
       style(empty, "display", !m.probing && m.probes === null ? "flex" : "none");

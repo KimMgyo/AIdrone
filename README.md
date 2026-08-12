@@ -974,6 +974,28 @@ Two consequences worth stating, because both removed working code:
   `DEFLECTION`, exported from `panels/keymap.ts`, printed once beside the
   follow loop's own `maxRc` because the comparison is the only reason either
   number is there.
+- **A shared formatter with no callers means someone re-typed it.** `mmss()`
+  in `ui.ts` had zero references anywhere while `station.ts` formatted flight
+  time by hand - and the hand-rolled copy did not clamp a negative, so a
+  firmware that ever reported one would have printed `-1:-5`. The station
+  calls the helper now.
+- **The landing header printed two of the four socket addresses** that the
+  LINK SETTINGS card already lists in full, next to the button that uses
+  them. Only the `SDK Tello 2.0` line, which has no other home, remains up
+  there.
+
+Those last two came out of a sweep for surfaces that look functional and are
+not - the class the person-list `<button>`s belonged to. What the sweep did
+**not** find is worth recording, because it is the part that stops the next
+person re-checking it: frontend `invoke`s and registered Rust commands match
+exactly, 13 for 13, with no orphan on either side; every one of those commands
+performs real work; both ArUco engines and the YOLO runtime genuinely run per
+frame; the copilot reaches a real streaming endpoint and its tools call the
+same command path an operator uses; dictation is real capture through
+whisper.cpp; every interactive element in the app has a listener that reaches
+something; `follow.stop()` has four callers, so the 중단됨 phase is reachable;
+every custom colour token used is declared; and `cargo check --all-targets`
+reports zero warnings, so the Rust side carries no dead code at all.
 
 The same rule ran over the two vision panels and the follow card, which had
 accumulated a paragraph of instructions each. Nothing on those three surfaces
