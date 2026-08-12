@@ -155,7 +155,7 @@ touching another NCM adapter; its transcript is
 `%ProgramData%\AIdrone\link.log`.
 
 **Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.16_amd64.deb`, then unplug/replug the board. The
+`sudo apt install ./AIdrone_0.1.17_amd64.deb`, then unplug/replug the board. The
 package installs a udev rule that renames the MAC-derived `enx…` interface to
 **`aidrone0`**, then a NetworkManager profile bound to that name assigns
 `192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
@@ -301,13 +301,47 @@ sudo ip link set enx0242ab... up
 Verify on either OS with `bun desktop/rx.ts probe` - it broadcasts on the
 subnet once a second and prints anything that answers.
 
+## Working on the UI, in a browser
+
+A Tauri build is 90 seconds and a UI question is usually one line of CSS, so
+the frontend also runs in a plain browser against a mock drone, with Vite's
+hot reload:
+
+```bash
+cd app
+bun run dev                      # http://localhost:1420
+```
+
+`src/dev/tauri-mock.ts` installs `window.__TAURI_INTERNALS__` itself, so the
+mock sits *below* `transport.ts` and every screen, panel and renderer above it
+runs exactly the code that ships - no branch, no second transport to keep in
+step. `import.meta.env.DEV` gates the import, so none of it reaches a release
+bundle. The video is the repository's own `sample.h264`, served by a dev-only
+Vite middleware and decoded by the real `VideoRenderer`, so latency readouts
+and dropped-frame counters are real measurements of the real pipeline.
+
+A layout is judged in its states, not its happy path, so the mock takes flags:
+
+| flag | what it puts on screen |
+|---|---|
+| `?autoconnect=1` | skips the landing screen - every save reloads straight back to the station |
+| `?bat=14` | holds the battery there; the colour thresholds are 30 and 15 |
+| `?update=1` | the "new version" banner |
+| `?empty=1` | no video, so the first-paint gate fails and its error is visible |
+| `?silent=8` | the datapath goes silent 8 s in |
+
+What it is not: a simulator. Nothing here models a drone, and a protocol
+question belongs to `desktop/fake-tello.ts` against the real binary. The
+copilot answers a canned line and issues no tool calls, because a mock that
+pretended to fly is the one thing here that could mislead.
+
 ## Building the installers
 
 ```bash
 cd app
 bun install
-bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.16_x64-setup.exe
-bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.16_amd64.deb
+bun run tauri build --bundles nsis           # Windows -> AIdrone_0.1.17_x64-setup.exe
+bash src-tauri/installer/linux/build-deb.sh  # Ubuntu  -> AIdrone_0.1.17_amd64.deb
 ```
 
 Windows additionally needs `FFMPEG_DIR` pointing at a shared FFmpeg build and
@@ -360,7 +394,7 @@ GStreamer H.264 plugin that `DT_NEEDED` cannot see:
 
 ```bash
 bash src-tauri/installer/linux/verify-deb.sh \
-  src-tauri/target/release/bundle/deb/AIdrone_0.1.16_amd64.deb
+  src-tauri/target/release/bundle/deb/AIdrone_0.1.17_amd64.deb
 ```
 
 The 64-bit `time_t` renames deliberately need no per-release handling:

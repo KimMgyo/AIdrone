@@ -1,3 +1,15 @@
+// Browser-first UI work: with no Tauri underneath, install the fake IPC before
+// anything imports the transport, and the whole app runs against a mock drone
+// with Vite's hot reload.
+//
+// Dynamic on purpose, and the one place in this app that is: `import.meta.env.DEV`
+// is a build-time constant, so this branch - and the mock behind it - is dropped
+// from a release bundle entirely. A static import would ship a fake drone inside
+// the real app.
+if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
+  await import("./dev/tauri-mock.ts");
+}
+
 /**
  * Composition root. Wiring only: every byte of drone I/O lives in Rust behind
  * `transport.ts`, every pixel of chrome lives in a screen or a panel, and this
