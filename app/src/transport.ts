@@ -706,6 +706,17 @@ export async function endpoints(): Promise<Endpoints> {
   return await invoke<Endpoints>("endpoints");
 }
 
+/**
+ * Whether the node's network link exists on this host - a different question
+ * from whether the drone answers, and the only one of the two that can be
+ * asked without touching the drone. Costs no packet (Rust resolves a route and
+ * reads back the source address), so it is safe to poll and safe beside a live
+ * session.
+ */
+export async function nodePresent(): Promise<boolean> {
+  return await invoke<boolean>("node_present");
+}
+
 /** Probes each socket and the drone itself. Takes ~2 s and cannot run while a
  *  session holds the ports. */
 export async function preflight(): Promise<Probe[]> {

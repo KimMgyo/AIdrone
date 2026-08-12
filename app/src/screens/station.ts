@@ -19,12 +19,21 @@ import type { ControlMode } from "../control-mode.ts";
 import { mmss, must, style, text } from "../ui.ts";
 
 /**
- * The connection, as the shell needs to show it. `detail` is the reason a
- * picture is not on screen - a failure message, or how long until the next
- * attempt - and is empty exactly when there is nothing to explain.
+ * The connection, as the shell needs to show it - and it is two connections,
+ * not one. The node is a USB network adapter; the drone is a radio peer behind
+ * it. They fail separately and the fixes are different, so a single "연결됨"
+ * hid the one thing an operator needs to know first: plug the cable in, or
+ * power-cycle the drone.
+ *
+ * `drone` is `null`, never `false`, while the node is down: with no path to
+ * the aircraft, calling it silent would be a claim this app cannot make.
  */
 export type LinkView = {
   phase: "connecting" | "online" | "offline";
+  node: boolean;
+  drone: boolean | null;
+  /** The reason there is no picture - a failure message, or what to do about
+   *  it. Empty exactly when there is nothing to explain. */
   detail: string;
 };
 
@@ -110,19 +119,20 @@ const TOGGLE =
   "w-[28px] h-[26px] bg-chip border border-[#232931] rounded-[3px] cursor-pointer flex items-center justify-center hover:bg-[#1C222A] hover:border-line4";
 const HEADER_DOT = "w-[6px] h-[6px] rounded-full";
 
-/** One word per phase, used by the chip and the hatch alike so the two can
- *  never describe the link differently. */
-const LINK_COPY: Record<LinkView["phase"], string> = {
+/** The hatch's headline, which is about the picture and so still follows the
+ *  phase. The two chips beside it answer a narrower question each. */
+const PHASE_COPY: Record<LinkView["phase"], string> = {
   connecting: "연결 중",
   online: "연결됨",
   offline: "오프라인",
 };
 
-const LINK_DOT: Record<LinkView["phase"], string> = {
-  connecting: "bg-warn animate-beat",
-  online: "bg-ok animate-beat",
-  offline: "bg-alert",
-};
+/** `null` is not a third kind of down - it is "cannot say", which is what the
+ *  drone cell honestly reads while the node is missing. */
+function peerCopy(up: boolean | null): { copy: string; dot: string } {
+  if (up === null) return { copy: "--", dot: "bg-dim3" };
+  return up ? { copy: "연결됨", dot: "bg-ok" } : { copy: "없음", dot: "bg-alert" };
+}
 
 type StationDeps = {
   onEmergency: () => void;
@@ -143,7 +153,6 @@ function finite(value: number | null): number | null {
   return value === null || !Number.isFinite(value) ? null : value;
 }
 
-
 export function installStation(mount: HTMLElement, deps: StationDeps): Station {
   mount.innerHTML = `
     <div class="h-[52px] flex-none border-b border-line bg-[#101318] flex items-center px-[13px] gap-[14px]">
@@ -153,14 +162,20 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       </div>
       <div class="w-px h-[20px] bg-line"></div>
 
-      <!-- One chip for the link, because the supervisor owns it: the operator
-           has no connect button to press and no address to read - both ends
-           are fixed constants the app already knows. What is worth a cell is
-           whether a picture is arriving, and if not, when the next attempt
-           lands. -->
+      <!-- Two chips, because there are two connections and they fail
+           separately: the node is a USB adapter that is either attached or
+           not, the drone is a radio peer behind it. One combined "연결됨" hid
+           which of the two to go and fix. Neither carries an address - both
+           ends are fixed constants the app already knows. -->
       <div class="${CHIP}">
-        <div data-k="link-dot" class="${HEADER_DOT} bg-dim3"></div>
-        <div data-k="link-copy" class="font-mono text-[11px] text-ink2">연결 대기</div>
+        <div data-k="node-dot" class="${HEADER_DOT} bg-dim3"></div>
+        <div class="font-mono text-[11px] text-dim2">NODE</div>
+        <div data-k="node-copy" class="font-mono text-[11px] text-ink2">--</div>
+      </div>
+      <div class="${CHIP}">
+        <div data-k="drone-dot" class="${HEADER_DOT} bg-dim3"></div>
+        <div class="font-mono text-[11px] text-dim2">DRONE</div>
+        <div data-k="drone-copy" class="font-mono text-[11px] text-ink2">--</div>
       </div>
       <div data-k="update" class="${CHIP} border-accent/40 bg-accent/10" hidden>
         <div class="font-mono text-[11px] text-accent">새 버전 <span data-k="update-version">--</span></div>
@@ -280,8 +295,10 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
   };
 
   const cell = {
-    linkDot: q("link-dot", HTMLDivElement),
-    linkCopy: q("link-copy", HTMLDivElement),
+    nodeDot: q("node-dot", HTMLDivElement),
+    nodeCopy: q("node-copy", HTMLDivElement),
+    droneDot: q("drone-dot", HTMLDivElement),
+    droneCopy: q("drone-copy", HTMLDivElement),
     update: q("update", HTMLDivElement),
     updateVersion: q("update-version", HTMLSpanElement),
     updateApply: q("update-apply", HTMLButtonElement),
@@ -396,12 +413,15 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       style(hatchLabel, "display", m.live ? "none" : "flex");
       style(canvas, "display", m.live ? "block" : "none");
 
-      // The chip and the hatch say the same thing at two sizes: the chip is
-      // the glance, the hatch is the one that has room for the reason.
-      const phase = m.link.phase;
-      text(cell.linkCopy, LINK_COPY[phase]);
-      cell.linkDot.className = `${HEADER_DOT} ${LINK_DOT[phase]}`;
-      text(cell.hatchState, LINK_COPY[phase]);
+      // Each chip answers its own question; the hatch keeps the headline about
+      // the picture, which is the thing neither chip is about.
+      const node = peerCopy(m.link.node);
+      text(cell.nodeCopy, node.copy);
+      cell.nodeDot.className = `${HEADER_DOT} ${node.dot}`;
+      const drone = peerCopy(m.link.drone);
+      text(cell.droneCopy, drone.copy);
+      cell.droneDot.className = `${HEADER_DOT} ${drone.dot}`;
+      text(cell.hatchState, PHASE_COPY[m.link.phase]);
       text(cell.hatchDetail, m.link.detail);
 
       cell.update.hidden = m.update === null;

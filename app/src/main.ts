@@ -56,6 +56,7 @@ import {
   connect,
   disconnect,
   endpoints,
+  nodePresent,
   onDroneState,
   onFrame,
   onLink,
@@ -587,6 +588,27 @@ const PICTURE_STALL_MS = 2_000;
  *  problem, which is what the socket probes answer. */
 const PROBE_AFTER_FAILURES = 3;
 
+/**
+ * The one failure retrying cannot fix. `ensure_stream_flowing` gives up with
+ * this wording after `command` succeeded and three `streamoff`/`streamon`
+ * cycles produced no frames - the drone is answering and still not streaming,
+ * which on a Tello needs its power cycled. Matched on the phrase Rust already
+ * emits rather than a new error code, so the two cannot drift apart silently:
+ * the regression is `lib.rs`'s own string.
+ */
+const WEDGED = /power-cycle the Tello/;
+
+/** How often the node's adapter is re-checked while offline. It is a route
+ *  lookup, not a packet, but there is no reason to ask at the shell's 4 Hz. */
+const NODE_POLL_MS = 1_000;
+
+/** The failure, in the terms of the thing an operator has to go and touch. */
+function diagnose(why: string): string {
+  if (!nodeUp) return "노드가 연결되어 있지 않습니다 · USB 케이블을 확인하세요";
+  if (WEDGED.test(why)) return "드론이 응답하지만 영상을 보내지 않습니다 · 드론 전원을 껐다 켜세요";
+  return why;
+}
+
 let phase: LinkView["phase"] = "offline";
 let detail = "";
 let failures = 0;
@@ -595,10 +617,24 @@ let retryAt = 0;
  *  state, and the reason this needs no timer of its own. */
 let lastPainted = 0;
 let lastPaintedAt = 0;
+/** The node's adapter, as Rust last reported it. Polled while offline; while
+ *  online it is provably true, because the picture is coming through it. */
+let nodeUp = false;
+let nodeCheckedAt = 0;
+/** True only when the drone has actually answered this session. Never `false`
+ *  while the node is missing - see `LinkView`. */
+let droneUp = false;
 
 function setPhase(next: LinkView["phase"], why: string): void {
   phase = next;
   detail = why;
+}
+
+/** The two peers as the shell shows them. `online` is proof of both: frames
+ *  are painting, and they came through the node from the drone. */
+function linkView(): LinkView {
+  if (phase === "online") return { phase, node: true, drone: true, detail };
+  return { phase, node: nodeUp, drone: nodeUp ? droneUp : null, detail };
 }
 
 /** What the top bar renders. Split out because the offer is gated on the link,
@@ -661,6 +697,8 @@ async function attempt(): Promise<void> {
     failures = 0;
     controlsReady = true;
     linkOk = true;
+    nodeUp = true;
+    droneUp = true;
     lastPainted = renderer.stats().painted;
     lastPaintedAt = performance.now();
     status = statusForMode(mode);
@@ -679,16 +717,22 @@ async function attempt(): Promise<void> {
     } else {
       renderer = null;
       vision.setSessionLive(false);
-      setPhase("offline", why);
     }
+    // Which of the two failed, asked rather than guessed: the node is an
+    // adapter this host either holds an address on or does not, and only if it
+    // does can "the drone did not answer" mean anything.
+    nodeUp = await nodePresent().catch(() => false);
+    droneUp = false;
+    setPhase("offline", diagnose(why));
     consolePanel.push("err", `!  connect: ${why}`);
-    // Back off, but never past the point where an operator would assume the
-    // app gave up: the ceiling is eight seconds, not a minute.
-    const wait = Math.min(RETRY_MIN_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+    // A drone the handshake has given up on does not come back by being asked
+    // faster - it needs hands on it - so that one failure goes straight to the
+    // ceiling instead of climbing there over four more attempts.
+    const wait = WEDGED.test(why) ? RETRY_MAX_MS : Math.min(RETRY_MIN_MS * 2 ** (failures - 1), RETRY_MAX_MS);
     retryAt = performance.now() + wait;
     // Awaited here, inside the `busy` hold, so the supervisor cannot start the
     // next attempt while preflight has the three sockets open.
-    if (failures === PROBE_AFTER_FAILURES) await probeSockets();
+    if (failures === PROBE_AFTER_FAILURES && nodeUp) await probeSockets();
   } finally {
     busy = false;
   }
@@ -736,7 +780,25 @@ function superviseLink(): void {
     });
     return;
   }
-  if (phase === "offline" && performance.now() >= retryAt) void attempt();
+  if (phase !== "offline") return;
+  // The node chip must move the moment the cable goes in, not only when the
+  // next attempt happens to run - on a long backoff those are seconds apart,
+  // and the chip is what tells the operator the cable worked.
+  const now = performance.now();
+  if (now - nodeCheckedAt >= NODE_POLL_MS) {
+    nodeCheckedAt = now;
+    void nodePresent()
+      .then((up) => {
+        // A node that has just appeared makes the current backoff pointless:
+        // it was counting down against a host with no link at all.
+        if (up && !nodeUp) retryAt = Math.min(retryAt, performance.now());
+        nodeUp = up;
+      })
+      .catch(() => {
+        nodeUp = false;
+      });
+  }
+  if (now >= retryAt) void attempt();
 }
 
 // --- fullscreen ------------------------------------------------------------
@@ -816,7 +878,7 @@ setInterval(() => {
     fps: stats?.displayedFps ?? null,
     mode,
     live: videoLive,
-    link: { phase, detail },
+    link: linkView(),
     rttMs: stats?.latencyP50Ms ?? null,
     bat: fresh?.bat ?? null,
     flightS: fresh?.time ?? null,

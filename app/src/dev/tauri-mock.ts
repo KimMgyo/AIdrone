@@ -26,6 +26,9 @@
  *                   frames keep coming, so the supervisor must NOT reconnect
  *   ?stall=6        stop the frames this many seconds in, session still up -
  *                   the supervisor should notice and dial again
+ *   ?nonode=1       the node's adapter is absent - NODE 없음, DRONE `--`
+ *   ?wedged=1       the drone answers but never streams; the one failure that
+ *                   needs hands on the aircraft
  *   ?bat=14         hold the battery here (colour thresholds are 30 / 15)
  */
 import { VISION_ARUCO_ENGINES } from "../transport.ts";
@@ -49,12 +52,19 @@ declare global {
 
 type ChannelLike = { onmessage?: (message: unknown) => void };
 
-const params = new URLSearchParams(location.search);
-const flag = (name: string): boolean => params.get(name) === "1";
+/**
+ * Read at call time, not snapshotted at import. A flag that only applies on
+ * load cannot express a TRANSITION, and the transitions are the states worth
+ * judging: the node arriving after the app started is a bug report, not a
+ * static screen. `history.replaceState({}, "", "/")` from the console flips
+ * any of these live and the supervisor reacts to it.
+ */
+const params = (): URLSearchParams => new URLSearchParams(location.search);
+const flag = (name: string): boolean => params().get(name) === "1";
 const number = (name: string, fallback: number): number => {
   // `Number(null)` is 0, so an absent flag would read as a real zero - which is
   // how the battery first came up empty here.
-  const raw = params.get(name);
+  const raw = params().get(name);
   const parsed = raw === null ? Number.NaN : Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
@@ -287,7 +297,15 @@ const handlers: Record<string, Handler> = {
     { id: "video", label: "영상 포트", detail: "udp/11111 사용 가능 (mock)", ok: true },
   ],
 
+  // The node is an adapter, so the mock answers the same question Rust does:
+  // does this host hold the link at all. `?nonode=1` takes it away, which is
+  // the state where the drone cell must read `--` rather than claim silence.
+  node_present: () => !flag("nonode"),
+
   connect: (args) => {
+    // The one failure retrying cannot fix, in the wording `lib.rs` emits.
+    if (flag("wedged")) throw new Error("no video after three streamon attempts - power-cycle the Tello");
+    if (flag("nonode")) throw new Error('tello: no reply to "command"');
     stopSession();
     const current: Session = {
       frames: args.frames,
@@ -402,8 +420,7 @@ window.__TAURI_INTERNALS__ = {
   },
 };
 
-
 console.info(
   "[dev] Tauri IPC mocked - drone, video and copilot are fake.",
-  "Flags: ?update=1 ?empty=1 ?silent=8 ?stall=6 ?bat=14",
+  "Flags: ?update=1 ?empty=1 ?silent=8 ?stall=6 ?nonode=1 ?wedged=1 ?bat=14",
 );

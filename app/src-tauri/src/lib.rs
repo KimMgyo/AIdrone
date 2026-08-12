@@ -18,7 +18,7 @@ mod video;
 mod vision;
 
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -466,6 +466,39 @@ fn endpoints() -> serde_json::Value {
     })
 }
 
+/// Whether the node's link exists on this host at all - which is a different
+/// question from whether the drone answers, and the panel now reports the two
+/// separately because the fixes are different (plug the cable in / power-cycle
+/// the drone).
+///
+/// Measured, not assumed: a connected UDP socket cannot tell the two apart.
+/// With no route to 192.168.4.0/24 `connect()` still succeeds and `send()`
+/// still reports 7 bytes written, because the datagram leaves by the default
+/// route and dies out there - identical, from the socket, to a drone that is
+/// simply not answering.
+///
+/// So ask the kernel which SOURCE address it would use. `connect` on UDP puts
+/// no packet on the wire; it only resolves the route. If the source it picks
+/// sits on the node's own /24, an adapter for that subnet exists. If it falls
+/// back to the default route's address, there is no node. This beats testing
+/// the installer's `192.168.4.50` directly, which an operator is free to have
+/// set to something else.
+#[tauri::command]
+fn node_present() -> bool {
+    let node = from_env("AIDRONE_DEVICE_IP", DEVICE_IP);
+    let Ok(sock) = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)) else {
+        return false;
+    };
+    // Port 9 (discard) is never contacted - connect resolves a route and stops.
+    if sock.connect(SocketAddrV4::new(node, 9)).is_err() {
+        return false;
+    }
+    match sock.local_addr() {
+        Ok(SocketAddr::V4(local)) => local.ip().octets()[..3] == node.octets()[..3],
+        _ => false,
+    }
+}
+
 /// How long one probe waits for its answer. A healthy Tello acks `command` in
 /// a few ms and state follows within one 10 Hz period, so this is slack for a
 /// link that is merely slow - and short enough that all three probes are done
@@ -689,6 +722,7 @@ pub fn run() {
             send_rc,
             set_vision_mode,
             endpoints,
+            node_present,
             preflight,
             copilot::copilot_turn,
             speech::dictate_ready,

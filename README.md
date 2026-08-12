@@ -330,6 +330,13 @@ A layout is judged in its states, not its happy path, so the mock takes flags:
 | `?empty=1` | no video, so the first-paint gate fails and its error is visible |
 | `?silent=8` | the datapath reports silent 8 s in, frames keep coming - the supervisor must not reconnect |
 | `?stall=6` | the frames stop 6 s in with the session still up - the supervisor must notice and dial again |
+| `?nonode=1` | the node's adapter is absent - NODE reads 없음 and DRONE reads `--` |
+| `?wedged=1` | the drone answers and never streams, the one failure needing hands on the aircraft |
+
+Flags are read at call time rather than snapshotted at import, so
+`history.replaceState({}, "", "/")` from the console flips one live. That is
+how "the node arrives after the app started" is exercised without a cable: a
+transition is a state too, and it was the one carrying a bug.
 
 What it is not: a simulator. Nothing here models a drone, and a protocol
 question belongs to `desktop/fake-tello.ts` against the real binary. The
@@ -955,6 +962,58 @@ the sockets. Three failures in a row is no longer a slow drone, so the socket
 preflight runs itself and prints all three results to the console - awaited
 inside the attempt's own `busy` hold, because `preflight` binds the same three
 ports and would otherwise report AddrInUse against a session it raced.
+
+### Two connections, not one - and the socket cannot tell them apart
+
+There is a node and there is a drone. The node is a USB network adapter; the
+drone is a radio peer behind it. They fail separately, the fixes are different
+(plug the cable in / power-cycle the aircraft), and one combined "연결됨" hid
+which one to go and touch. The top bar carries a chip each.
+
+Telling them apart is harder than it looks, and the obvious method does not
+work. Measured with a scratch program against a host holding no route to
+`192.168.4.0/24`:
+
+```
+attempt 1 (no route)   connect=ok  send=7B  no reply (timeout)
+attempt 3 (peer up)    connect=ok  send=7B  reply="ok"
+```
+
+`connect()` succeeds and `send()` reports all seven bytes written **with no
+node attached at all**, because the datagram leaves by the default route and
+dies out there. From the socket, a missing node and a silent drone are the
+same event. The same run also cleared two suspects for the reconnect
+complaints: attempts alternated freely between unreachable and reachable, so a
+failed attempt never leaves a port bound and never poisons the next one.
+
+What does work is asking the kernel which **source address** it would use.
+`connect` on UDP puts nothing on the wire - it only resolves a route - and
+`local_addr()` then reports the interface it picked. If that address sits on
+the node's own `/24`, an adapter for the node exists; if the kernel fell back
+to the default route, it does not. `node_present()` is those four lines. It
+beats testing the installer's `192.168.4.50` directly, which an operator is
+free to have set to something else.
+
+That gives each cell an honest value, including the one that has none: while
+the node is missing the drone cell reads `--`, not "없음", because with no path
+to the aircraft this app cannot claim it is silent.
+
+**Starting the app before attaching the node now works.** The supervisor
+re-checks the adapter once a second while offline, and a node that has just
+appeared collapses whatever backoff was running - it was counting down against
+a host with no link at all. Measured in the browser mock, flipping the flag
+live: node absent at 7 s with `노드가 연결되어 있지 않습니다 · USB 케이블을
+확인하세요` on the hatch, and a painted picture **1.6 s** after the node
+appeared, with no interaction.
+
+**A drone that needs a power cycle now says so.** `ensure_stream_flowing` has
+always ended with `no video after three streamon attempts - power-cycle the
+Tello` when `command` is answered and three `streamoff`/`streamon` cycles
+produce no frames; that is a Tello firmware state, and no amount of retrying
+is going to clear it. The supervisor matches that exact string, prints the
+remedy in Korean on the hatch, and jumps its backoff straight to the ceiling
+rather than hammering an aircraft that needs hands on it. The match is on
+`lib.rs`'s own wording deliberately, so the two cannot drift apart unnoticed.
 
 ### The UI runtime: Tailwind 4, no component framework
 
