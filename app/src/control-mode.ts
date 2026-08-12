@@ -24,7 +24,7 @@ export const CONTROL_MODES = [
   },
   {
     id: "aruco",
-    label: "ArUco 마커 추적",
+    label: "마커 추적",
     key: "F3",
     color: "warn",
     stageTag: "ARUCO / NATIVE DETECTOR",

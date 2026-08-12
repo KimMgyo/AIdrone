@@ -1,11 +1,10 @@
 import {
   type NativeVisionAdapter,
   type PersonDetection,
-  type PersonTargetState,
   type PersonVisionState,
 } from "../lib/aruco.ts";
 import type { FollowPort } from "../follow.ts";
-import { installFollowControl } from "./follow-control.ts";
+import { installTargetBox } from "./target-box.ts";
 import { cls, must, text } from "../ui.ts";
 
 export interface PersonTrackerPanel {
@@ -17,58 +16,26 @@ export interface PersonTrackerDeps {
   readonly follow: FollowPort;
 }
 
-const STATUS_BOX = "flex min-h-[32px] items-center gap-[8px] rounded-[3px] border px-[11px]";
-const STATUS_DOT = "h-[6px] w-[6px] flex-none rounded-full";
-const STATUS_COPY = "min-w-0 text-[11.5px]";
+/**
+ * The detector's own line inside the TARGET box: which engine, and how long
+ * this frame took it. The result count is NOT here - `DETECTED · N` below is
+ * its one home, and this line sat above it saying the same number.
+ */
+function personEngine(state: PersonVisionState): string {
+  if (!state.active) return "YOLO26n · 비활성";
+  if (state.recvEpochUs === null) return "YOLO26n · 결과 대기";
+  return `YOLO26n · ${state.analysisMs === null ? "--" : `${state.analysisMs.toFixed(1)} ms`}`;
+}
 
-/** Same state vocabulary the ArUco panel uses; a lock reads identically in
- * both detectors, only the accent colour differs. */
-const TARGET_LABEL: Record<PersonTargetState, string> = {
-  inactive: "비활성",
-  waitingFrame: "프레임 대기",
-  unselected: "대상 미선택",
-  searching: "화면에 없음",
-  detected: "감지됨",
-  error: "분석 오류",
-};
-
-const TARGET_BADGE_TONE: Record<PersonTargetState, string> = {
-  inactive: "border border-line3 text-dim2",
-  waitingFrame: "border border-line3 text-dim",
-  unselected: "border border-line3 text-dim",
-  searching: "border border-line3 text-dim",
-  detected: "border-0 bg-ok text-[#07140A]",
-  error: "border border-alert/45 text-alert2",
-};
-
-const TARGET_BADGE = "flex-none rounded-[2px] px-[7px] py-[3px] font-mono text-[9px] tracking-[.1em]";
-
-/** Fragments, never sentences: this line is a reading like any other. */
-function personStatus(state: PersonVisionState): {
-  readonly box: string;
-  readonly dot: string;
-  readonly copy: string;
-  readonly detail: string;
-} {
-  const quiet = { box: "border-line3 bg-raised", dot: "bg-dim", copy: "text-dim" };
-  if (!state.active) return { ...quiet, dot: "bg-dim3", detail: "비활성" };
-  if (state.status?.state === "error") {
-    return {
-      box: "border-alert/45 bg-alert/10",
-      dot: "bg-alert",
-      copy: "text-alert2",
-      detail: state.status.detail === undefined ? "오류" : `오류 · ${state.status.detail}`,
-    };
-  }
-  if (state.status?.state === "inactive") return { ...quiet, dot: "bg-dim3", detail: "비활성" };
-  if (state.status?.state === "waitingFrame") return { ...quiet, detail: "프레임 대기" };
-  if (state.recvEpochUs === null) return { ...quiet, detail: "결과 대기" };
-  return {
-    box: "border-ok/35 bg-ok/10",
-    dot: "bg-ok animate-beat",
-    copy: "text-[#A8D9AE]",
-    detail: `YOLO26n · ${state.detections.length}개 · ${state.analysisMs === null ? "--" : `${state.analysisMs.toFixed(1)} ms`}`,
-  };
+/** A detector fault, in fragments, or `null` when it is running. Only these
+ *  outrank the follow phase in the box's badge. */
+function personTrouble(state: PersonVisionState): string | null {
+  if (!state.active) return "비활성";
+  if (state.status?.state === "error") return "분석 오류";
+  if (state.status?.state === "inactive") return "비활성";
+  if (state.status?.state === "waitingFrame") return "프레임 대기";
+  if (state.recvEpochUs === null) return "결과 대기";
+  return null;
 }
 
 function detectionFacts(detection: PersonDetection): string {
@@ -157,17 +124,10 @@ function reconcileDetectionRows(
 export function installPersonTracker(mount: HTMLElement, deps: PersonTrackerDeps): PersonTrackerPanel {
   mount.innerHTML = `
     <section class="flex h-full min-h-0 flex-col gap-[10px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="Native person detector">
-      <div data-k="person-status" role="status" class="${STATUS_BOX}">
-        <div data-k="person-status-dot" class="${STATUS_DOT}"></div>
-        <div data-k="person-status-copy" class="${STATUS_COPY}"></div>
-      </div>
-
-      <div class="flex items-center gap-[8px] rounded-[3px] border border-[#1E3021] border-l-2 border-l-ok bg-sunken px-[10px] py-[8px]">
-        <div class="flex-none font-mono text-[9.5px] tracking-[.14em] text-dim2">TARGET</div>
-        <div data-k="person-target-title" class="min-w-0 flex-1 truncate font-mono text-[13px] text-ok">--</div>
-        <div data-k="person-target-badge" class="${TARGET_BADGE} border border-line3 text-dim2">--</div>
-      </div>
-      <div data-k="follow-mount"></div>
+      <!-- Two sections and no more: who is being followed, and what was seen.
+           The detector's own line lives inside the first because it is the
+           evidence behind it, not a third subject. -->
+      <div data-k="target-mount"></div>
 
       <div data-k="person-detected" class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · 0</div>
       <div data-k="person-note" class="font-mono text-[10.5px] text-dim2" hidden></div>
@@ -175,41 +135,30 @@ export function installPersonTracker(mount: HTMLElement, deps: PersonTrackerDeps
     </section>
   `;
 
-  const statusBox = must("[data-k=person-status]", HTMLDivElement, mount);
-  const statusDot = must("[data-k=person-status-dot]", HTMLDivElement, mount);
-  const statusCopy = must("[data-k=person-status-copy]", HTMLDivElement, mount);
-  const targetTitle = must("[data-k=person-target-title]", HTMLDivElement, mount);
-  const targetBadge = must("[data-k=person-target-badge]", HTMLDivElement, mount);
   const detected = must("[data-k=person-detected]", HTMLDivElement, mount);
   const list = must("[data-k=person-list]", HTMLDivElement, mount);
   const listNote = must("[data-k=person-note]", HTMLDivElement, mount);
   const detectionRowNodes = new Map<number, DetectionRow>();
+  // No clear button: the target is whoever is nearest, so there is no lock to
+  // release and a control offering to would do nothing.
+  const target = installTargetBox(must("[data-k=target-mount]", HTMLDivElement, mount), "ok", deps.follow);
 
   const paint = (next: PersonVisionState): void => {
-    const status = personStatus(next);
-    cls(statusBox, `${STATUS_BOX} ${status.box}`);
-    cls(statusDot, `${STATUS_DOT} ${status.dot}`);
-    cls(statusCopy, `${STATUS_COPY} ${status.copy}`);
-    text(statusCopy, status.detail);
-
-    cls(targetBadge, `${TARGET_BADGE} ${TARGET_BADGE_TONE[next.target.state]}`);
-    text(targetBadge, TARGET_LABEL[next.target.state]);
-
-    text(targetTitle, next.target.id === null ? "--" : `TRACK ${next.target.id}`);
-
+    target.update({
+      title: next.target.id === null ? "--" : `TRACK ${next.target.id}`,
+      engine: personEngine(next),
+      trouble: personTrouble(next),
+      locked: next.target.id !== null,
+    });
     text(detected, `DETECTED · ${next.detections.length}`);
     reconcileDetectionRows(list, listNote, detectionRowNodes, next);
   };
 
-  // Nothing here is clickable any more: the target is whoever is nearest, and
-  // there is no selection for a click to make.
-
   const unsubscribe = deps.vision.subscribePerson(paint);
-  const followControl = installFollowControl(must("[data-k=follow-mount]", HTMLDivElement, mount), "ok", deps.follow);
 
   return {
     dispose(): void {
-      followControl.dispose();
+      target.dispose();
       unsubscribe();
     },
   };

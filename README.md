@@ -1114,6 +1114,43 @@ worse layout. It is safe only because `main.ts` paints both from the same
 over six consecutive samples, they never did. Any copy that cannot make that
 guarantee is a defect, not an exception.
 
+### Each vision panel is two sections, and one of them is a single box
+
+The panels had grown to three stacked boxes above the detection list: a
+detector status pill, a target row, and a follow card - three borders, three
+badges and three tones for one answer. They are now **TARGET** and
+**DETECTED**, and TARGET is one box:
+
+```
+┌ TARGET                              [추적 중] ┐
+│ TRACK 1                                       │
+│ 전후 35 · yaw 14                               │
+│ 폭 180 → 360 px · 2.00× 멂                     │
+│ POWER 50 · 수동 60                             │
+│ YOLO26n · 11.2 ms                              │
+└───────────────────────────────────────────────┘
+DETECTED · 2
+```
+
+`panels/target-box.ts` is that box, and both panels mount it - the marker
+panel with a release callback, the person panel without one, because a person
+target is whoever is nearest and there is no lock to let go of. The button is
+absent rather than disabled in that panel, and hidden until something is
+locked in the other.
+
+Two things it collapsed rather than moved:
+
+- **One badge, not three.** The follow phase is the badge, and a detector
+  fault outranks it - a loop reported 정지 by a detector that is not running
+  is not the fact worth showing. That precedence is one `??` in `paint()`.
+- **The result count left the status line.** It read `YOLO26n · 2개 · 11.2 ms`
+  directly above `DETECTED · 2`; the engine line now carries only what the
+  header cannot, which is which engine ran and how long it took.
+
+The mode is called **마커 추적** rather than "ArUco 마커 추적". The dictionary
+is still named, once, on the engine line inside the box where it is evidence
+rather than a title.
+
 ### Two input rows that did not survive a narrow window
 
 The app declares `min-w-[1024px]`, so 1024 is a width it promises to work at.

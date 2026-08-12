@@ -1,14 +1,13 @@
 import {
   markerMetrics,
   NATIVE_ARUCO_DICTIONARY,
-  type ArucoTargetState,
   type ArucoVisionState,
   type NativeVisionAdapter,
 } from "../lib/aruco.ts";
 import type { FollowPort } from "../follow.ts";
 import type { VisionArucoEngineResult, VisionArucoEngineState } from "../transport.ts";
 import { markerTargetPx, parseMarkerSize, type MarkerSizes } from "../marker-size.ts";
-import { installFollowControl } from "./follow-control.ts";
+import { installTargetBox } from "./target-box.ts";
 import { cls, must, text } from "../ui.ts";
 
 export interface ArucoPanelDeps {
@@ -20,54 +19,6 @@ export interface ArucoPanelDeps {
 export interface ArucoPanel {
   dispose(): void;
 }
-
-const TARGET_LABEL: Record<ArucoTargetState, string> = {
-  inactive: "비활성",
-  waitingFrame: "프레임 대기",
-  unselected: "대상 미선택",
-  searching: "화면에 없음",
-  detected: "감지됨",
-  error: "분석 오류",
-};
-
-const STATUS_TONE: Record<ArucoTargetState, { box: string; dot: string; copy: string; badge: string }> = {
-  inactive: {
-    box: "border-line3 bg-raised",
-    dot: "bg-dim3",
-    copy: "text-dim",
-    badge: "border border-line3 text-dim2",
-  },
-  waitingFrame: {
-    box: "border-line3 bg-raised",
-    dot: "bg-dim",
-    copy: "text-dim",
-    badge: "border border-line3 text-dim",
-  },
-  unselected: {
-    box: "border-line3 bg-raised",
-    dot: "bg-dim",
-    copy: "text-dim",
-    badge: "border border-line3 text-dim",
-  },
-  searching: {
-    box: "border-line3 bg-raised",
-    dot: "bg-dim",
-    copy: "text-dim",
-    badge: "border border-line3 text-dim",
-  },
-  detected: {
-    box: "border-warn/35 bg-warn/10",
-    dot: "bg-warn animate-beat",
-    copy: "text-[#F0D19A]",
-    badge: "border-0 bg-warn text-[#1A1204]",
-  },
-  error: {
-    box: "border-alert/45 bg-alert/10",
-    dot: "bg-alert",
-    copy: "text-alert2",
-    badge: "border border-alert/45 text-alert2",
-  },
-};
 
 type EnginePanelState = "waiting" | VisionArucoEngineState;
 
@@ -291,39 +242,39 @@ function reconcileMarkerRows(
   }
 }
 
-/** A fragment, never a sentence. The status line is a reading; anything that
- *  had to be explained in prose did not belong on the panel. */
+/**
+ * The detector's own line inside the TARGET box: the primary engine, the
+ * dictionary it reads, and how long this frame took. The marker count is NOT
+ * here - `DETECTED · N` below owns it.
+ */
 function detectorStatus(state: ArucoVisionState): string {
+  if (!state.active) return `AprilTag 3 · ${NATIVE_ARUCO_DICTIONARY} · 비활성`;
+  if (state.recvEpochUs === null) return `AprilTag 3 · ${NATIVE_ARUCO_DICTIONARY} · 결과 대기`;
+  const ms = state.analysisMs === null ? "--" : `${state.analysisMs.toFixed(1)} ms`;
+  return `AprilTag 3 · ${NATIVE_ARUCO_DICTIONARY} · ${ms}`;
+}
+
+/** A detector fault, in fragments, or `null` when it is running. Only these
+ *  outrank the follow phase in the box's badge. */
+function arucoTrouble(state: ArucoVisionState): string | null {
   if (!state.active) return "비활성";
-  if (state.status?.state === "error") {
-    return state.status.detail === undefined ? "오류" : `오류 · ${state.status.detail}`;
-  }
+  if (state.status?.state === "error") return "오류";
   if (state.status?.state === "inactive") return "비활성";
   if (state.status?.state === "waitingFrame") return "프레임 대기";
-  const primary = state.comparison?.engines[0] ?? null;
-  if (primary?.state === "error") {
-    return primary.detail === undefined ? "AprilTag 3 오류" : `AprilTag 3 오류 · ${primary.detail}`;
-  }
+  // The per-engine rows below carry the detail; the badge only says which of
+  // the two engines is the one that failed.
+  if (state.comparison?.engines[0].state === "error") return "AprilTag 3 오류";
   if (state.recvEpochUs === null) return "결과 대기";
-  return `AprilTag 3 · ${state.markers.length}개 · ${state.analysisMs === null ? "--" : `${state.analysisMs.toFixed(1)} ms`}`;
+  return null;
 }
 
 export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): ArucoPanel {
   mount.innerHTML = `
     <section class="flex h-full min-h-0 flex-col gap-[10px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="ArUco marker detector">
-      <div data-k="status-box" role="status" class="flex min-h-[30px] items-center gap-[8px] rounded-[3px] border px-[10px]">
-        <div data-k="status-dot" class="h-[6px] w-[6px] flex-none rounded-full"></div>
-        <div data-k="status" class="min-w-0 flex-1 truncate text-[11.5px]"></div>
-        <div class="flex-none font-mono text-[9px] tracking-[.1em] text-dim2">${NATIVE_ARUCO_DICTIONARY}</div>
-      </div>
-
-      <div class="flex items-center gap-[8px] rounded-[3px] border border-[#2A2418] border-l-2 border-l-warn bg-sunken px-[10px] py-[8px]">
-        <div class="flex-none font-mono text-[9.5px] tracking-[.14em] text-dim2">TARGET</div>
-        <div data-k="target-title" class="min-w-0 flex-1 truncate font-mono text-[13px] text-warn">--</div>
-        <div data-k="target-badge" class="flex-none rounded-[2px] px-[6px] py-[2px] font-mono text-[9px] tracking-[.1em]">--</div>
-        <button data-k="clear" type="button" data-action="clear-target" hidden class="h-[21px] flex-none rounded-[2px] border border-line4 bg-key px-[7px] font-mono text-[9.5px] text-dim cursor-pointer hover:bg-btn hover:text-ink2">해제</button>
-      </div>
-      <div data-k="follow-mount"></div>
+      <!-- Same two sections as the person panel: who is being followed, and
+           what was seen. The A/B engine rows sit under the list because they
+           are evidence about the detection, not about the target. -->
+      <div data-k="target-mount"></div>
 
       <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · <span data-k="count">0</span></div>
       <div data-k="marker-note" class="font-mono text-[10.5px] text-dim2" hidden></div>
@@ -352,12 +303,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     </section>
   `;
 
-  const statusBox = must("[data-k=status-box]", HTMLDivElement, mount);
-  const statusDot = must("[data-k=status-dot]", HTMLDivElement, mount);
-  const status = must("[data-k=status]", HTMLDivElement, mount);
-  const targetTitle = must("[data-k=target-title]", HTMLDivElement, mount);
-  const targetBadge = must("[data-k=target-badge]", HTMLDivElement, mount);
-  const clear = must("[data-k=clear]", HTMLButtonElement, mount);
   const count = must("[data-k=count]", HTMLSpanElement, mount);
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
@@ -378,24 +323,22 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   };
 
   let current = deps.vision.arucoSnapshot();
+  const target = installTargetBox(must("[data-k=target-mount]", HTMLDivElement, mount), "warn", deps.follow, () =>
+    deps.vision.setArucoTarget(null),
+  );
 
   const paint = (next: ArucoVisionState): void => {
     current = next;
-    const tone = STATUS_TONE[next.target.state];
-    cls(statusBox, `flex min-h-[30px] items-center gap-[8px] rounded-[3px] border px-[10px] ${tone.box}`);
-    cls(statusDot, `h-[6px] w-[6px] flex-none rounded-full ${tone.dot}`);
-    cls(targetBadge, `flex-none rounded-[2px] px-[6px] py-[2px] font-mono text-[9px] tracking-[.1em] ${tone.badge}`);
-    cls(status, `min-w-0 flex-1 truncate text-[11.5px] ${tone.copy}`);
-    text(status, detectorStatus(next));
-
     // A target whose size has since been cleared is not being followed, so the
     // badge says which of the two it is rather than a sentence saying why.
     const targetSizeCm = next.target.id === null ? null : deps.sizes.get(next.target.id);
-    text(targetBadge, next.target.id !== null && targetSizeCm === null ? "크기 필요" : TARGET_LABEL[next.target.state]);
-    // The only control on this panel, and it is only shown when there is a
-    // lock for it to release.
-    clear.hidden = next.target.id === null;
-    text(targetTitle, next.target.id === null ? "--" : `ID ${next.target.id}`);
+    target.update({
+      title: next.target.id === null ? "--" : `ID ${next.target.id}`,
+      engine: detectorStatus(next),
+      trouble:
+        next.target.id !== null && targetSizeCm === null ? "크기 필요" : arucoTrouble(next),
+      locked: next.target.id !== null,
+    });
 
     text(count, String(next.markers.length));
     reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes);
@@ -404,12 +347,10 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   };
 
   const onClick = (event: MouseEvent): void => {
+    // The clear button lives inside the target box and has its own handler;
+    // this only owns the marker rows.
     const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("button") : null;
     if (button === null || !mount.contains(button)) return;
-    if (button.dataset.action === "clear-target") {
-      deps.vision.setArucoTarget(null);
-      return;
-    }
     const encoded = button.dataset.targetId;
     if (encoded === undefined) return;
     const id = Number(encoded);
@@ -425,11 +366,10 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const unsubscribeSizes = deps.sizes.subscribe(() => {
     paint(current);
   });
-  const followControl = installFollowControl(must("[data-k=follow-mount]", HTMLDivElement, mount), "warn", deps.follow);
 
   return {
     dispose(): void {
-      followControl.dispose();
+      target.dispose();
       unsubscribe();
       unsubscribeSizes();
       mount.removeEventListener("click", onClick);
