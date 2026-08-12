@@ -975,6 +975,14 @@ Two consequences worth stating, because both removed working code:
   follow loop's own `maxRc` because the comparison is the only reason either
   number is there.
 
+One repeat survives on purpose. `yaw` is both a HUD cell and one of the
+panel's three attitude needles, because heading over the picture is what a
+pilot reads and splitting the pitch/roll/yaw triple to avoid it would be the
+worse layout. It is safe only because `main.ts` paints both from the same
+`fresh` state object on the same tick, so the two cannot disagree - measured
+over six consecutive samples, they never did. Any copy that cannot make that
+guarantee is a defect, not an exception.
+
 ### Native vision stays off the WebView's pixel path
 
 `render.ts` only decodes and paints. It does not call `getImageData()` or run a
