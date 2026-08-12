@@ -18,8 +18,12 @@ import { all, cls, must, style, text } from "../ui.ts";
  * ±deflection a held key commands, on the SDK's -100..100 `rc` scale. The
  * sticks are digital - a key is down or it is not - so this single number is
  * the whole flight envelope of keyboard control. 60 is the prototype's value.
+ *
+ * Exported because the follow card prints it beside the follow loop's own
+ * authority: two literals would be free to drift apart, and the comparison is
+ * the only reason either number is on screen.
  */
-const DEFLECTION = 60;
+export const DEFLECTION = 60;
 
 /**
  * 10 Hz. The SDK asks for 5-10 Hz on `rc`, and the sibling tellovoice firmware

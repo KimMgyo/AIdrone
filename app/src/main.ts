@@ -794,6 +794,7 @@ setInterval(() => {
   const model: StationModel = {
     ipcMs: stats.transportP50Ms,
     decodeMs: stats.decodeMs,
+    fps: stats.displayedFps,
     mode,
     live: videoLive,
     node: link?.node ?? "--",
@@ -809,12 +810,10 @@ setInterval(() => {
     linkOk,
   };
   station.update(model);
-  telemetry.update(fresh, { fps: stats.displayedFps });
+  telemetry.update(fresh);
   overlay.update({
     state: fresh,
     live: videoLive,
-    linkFps: lastTelemetry?.fps ?? 0,
-    linkMbps: lastTelemetry?.mbps ?? 0,
     width: stats.width,
     height: stats.height,
     mode,

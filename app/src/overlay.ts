@@ -60,8 +60,6 @@ export type PersonOverlayData = Readonly<{
 export type StageOverlayModel = Readonly<{
   state: DroneState | null;
   live: boolean;
-  linkFps: number;
-  linkMbps: number;
   width: number;
   height: number;
   mode?: ControlMode;
@@ -291,12 +289,11 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
 
       const width = Math.round(m.width);
       const height = Math.round(m.height);
+      // Format identity only. The rates this line used to carry - fps and Mb/s -
+      // are the status bar's, and a second copy over the picture is one more
+      // thing that can disagree with it.
       const sized = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
-      const linkFps = finiteNumber(m.linkFps);
-      const linkMbps = finiteNumber(m.linkMbps);
-      const fps = linkFps === null || linkFps <= 0 ? MISSING : linkFps.toFixed(0);
-      const mbps = linkMbps === null || linkMbps <= 0 ? MISSING : linkMbps.toFixed(1);
-      text(stream, `${sized ? `${width}×${height}` : MISSING} · ${sized ? aspect(width, height) : MISSING} · ${fps} fps · ${mbps} Mb/s`);
+      text(stream, sized ? `${width}×${height} · ${aspect(width, height)}` : MISSING);
 
       const altCm = finiteNumber(s?.h);
       text(altCell, altCm === null ? MISSING : `${(altCm / 100).toFixed(2)} m`);

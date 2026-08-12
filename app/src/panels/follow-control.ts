@@ -8,6 +8,7 @@
  */
 import { type FollowPhase, type FollowPort, type FollowState } from "../follow.ts";
 import { cls, must, text } from "../ui.ts";
+import { DEFLECTION } from "./keymap.ts";
 
 /** Each panel keeps its own accent so the two stay tellable apart. */
 export type FollowAccent = "warn" | "ok";
@@ -65,7 +66,7 @@ export function installFollowControl(mount: HTMLElement, accent: FollowAccent, f
       <div data-k="follow-detail" class="mt-[7px] text-[11px] leading-[1.55] text-dim"></div>
       <div data-k="follow-distance" class="mt-[5px] font-mono text-[10px] leading-[1.5] text-dim2">거리 --</div>
       <div data-k="follow-power" class="mt-[7px] font-mono text-[10px] leading-[1.5] text-dim2">POWER --</div>
-      <div class="mt-[6px] font-mono text-[9.5px] leading-[1.5] text-dim2">${ENGAGEMENT[accent].footnote} · yaw·전후 2채널 (roll/상하 0) · 수동 조종은 60</div>
+      <div class="mt-[6px] font-mono text-[9.5px] leading-[1.5] text-dim2">${ENGAGEMENT[accent].footnote} · yaw·전후 2채널 (roll/상하 0)</div>
     </div>
   `;
 
@@ -133,7 +134,9 @@ export function installFollowControl(mount: HTMLElement, accent: FollowAccent, f
   // computed, so there is no control left for a click to reach.
   const unsubscribe = follow.subscribe((state) => {
     paint(state);
-    text(power, `POWER ${state.maxRc} (고정) · 수동 조종은 60`);
+    // Manual deflection is printed here and nowhere else on this card: the
+    // number only means something next to the loop's own authority.
+    text(power, `POWER ${state.maxRc} (고정) · 수동 조종은 ${DEFLECTION}`);
     paintDistance(state);
   });
   return {

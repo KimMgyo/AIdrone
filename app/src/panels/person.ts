@@ -214,14 +214,9 @@ export function installPersonTracker(mount: HTMLElement, deps: PersonTrackerDeps
       </div>
       <div data-k="person-note" class="rounded-[3px] border border-line2 bg-sunken px-[10px] py-[10px] text-[11px] leading-[1.6] text-dim2" hidden></div>
       <div data-k="person-list" class="flex flex-col gap-[6px]"></div>
-
-      <div class="h-px bg-line2"></div>
-      <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">NATIVE OBSERVATION FACTS</div>
-      <div class="flex flex-col gap-[7px]">
-        <div class="flex items-baseline justify-between"><div class="text-[11.5px] text-dim">입력 프레임</div><div data-k="person-frame" class="font-mono text-[12px] text-ink">--</div></div>
-        <div class="flex items-baseline justify-between"><div class="text-[11.5px] text-dim">분석 시간</div><div data-k="person-analysis" class="font-mono text-[12px] text-ink">--</div></div>
-        <div class="flex items-baseline justify-between"><div class="text-[11.5px] text-dim">수신 시각</div><div data-k="person-received" class="font-mono text-[12px] text-ink">--</div></div>
-      </div>
+      <!-- No facts block: the status line above already states the detector,
+           the result count and the analysis time, and the frame size is the
+           overlay's. This panel is the detections and nothing else. -->
     </section>
   `;
 
@@ -236,9 +231,6 @@ export function installPersonTracker(mount: HTMLElement, deps: PersonTrackerDeps
   const list = must("[data-k=person-list]", HTMLDivElement, mount);
   const listNote = must("[data-k=person-note]", HTMLDivElement, mount);
   const detectionRowNodes = new Map<number, DetectionRow>();
-  const frame = must("[data-k=person-frame]", HTMLDivElement, mount);
-  const analysis = must("[data-k=person-analysis]", HTMLDivElement, mount);
-  const received = must("[data-k=person-received]", HTMLDivElement, mount);
 
   const paint = (next: PersonVisionState): void => {
     const status = personStatus(next);
@@ -261,9 +253,6 @@ export function installPersonTracker(mount: HTMLElement, deps: PersonTrackerDeps
 
     text(detected, `DETECTED · ${next.detections.length}`);
     reconcileDetectionRows(list, listNote, detectionRowNodes, next);
-    text(frame, next.frameSize === null ? "--" : `${next.frameSize.width} × ${next.frameSize.height} px`);
-    text(analysis, next.analysisMs === null ? "--" : `${next.analysisMs.toFixed(1)} ms`);
-    text(received, next.recvEpochUs === null ? "--" : `${next.recvEpochUs} µs`);
   };
 
   // Nothing here is clickable any more: the target is whoever is nearest, and

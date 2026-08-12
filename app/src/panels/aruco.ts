@@ -340,10 +340,7 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
       <button type="button" data-action="clear-target" class="h-[27px] rounded-[3px] border border-line4 bg-key px-[9px] font-mono text-[10px] text-dim cursor-pointer hover:bg-btn hover:text-ink2">CLEAR PRESENTATION TARGET</button>
       <div data-k="follow-mount"></div>
 
-      <div class="flex items-center justify-between">
-        <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · <span data-k="count">0</span></div>
-        <div data-k="dictionary" class="max-w-[190px] truncate font-mono text-[10px] text-dim2">DICT --</div>
-      </div>
+      <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · <span data-k="count">0</span></div>
       <div data-k="marker-note" class="rounded-[3px] border border-line2 bg-sunken px-[10px] py-[10px] text-[11px] leading-[1.6] text-dim2" hidden></div>
       <div data-k="marker-list" class="flex flex-col gap-[6px]"></div>
 
@@ -375,13 +372,9 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
           <div data-k="engine-aruco-detail" hidden class="mt-[7px] break-words border-t border-alert/25 pt-[6px] font-mono text-[9px] leading-[1.45] text-alert2"></div>
         </div>
       </div>
-      <div class="h-px bg-line2"></div>
-      <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">NATIVE OBSERVATION FACTS</div>
-      <div class="flex flex-col gap-[7px]">
-        <div class="flex items-baseline justify-between"><div class="text-[11.5px] text-dim">입력 프레임</div><div data-k="frame" class="font-mono text-[12px] text-ink">--</div></div>
-        <div class="flex items-baseline justify-between"><div class="text-[11.5px] text-dim">분석 시간</div><div data-k="analysis" class="font-mono text-[12px] text-ink">--</div></div>
-        <div class="flex items-baseline justify-between"><div class="text-[11.5px] text-dim">수신 시각</div><div data-k="received" class="font-mono text-[12px] text-ink">--</div></div>
-      </div>
+      <!-- No observation-facts block: the frame size is the overlay's, the
+           analysis time is printed per engine right above, and a raw epoch in
+           microseconds was never a reading anyone could use. -->
     </section>
   `;
 
@@ -393,13 +386,9 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const targetDetail = must("[data-k=target-detail]", HTMLDivElement, mount);
   const targetBadge = must("[data-k=target-badge]", HTMLDivElement, mount);
   const count = must("[data-k=count]", HTMLSpanElement, mount);
-  const dictionary = must("[data-k=dictionary]", HTMLDivElement, mount);
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
   const markerRowNodes = new Map<number, MarkerRow>();
-  const frame = must("[data-k=frame]", HTMLDivElement, mount);
-  const analysis = must("[data-k=analysis]", HTMLDivElement, mount);
-  const received = must("[data-k=received]", HTMLDivElement, mount);
   const arucoEngine: EngineView = {
     card: must("[data-k=engine-aruco-card]", HTMLDivElement, mount),
     badge: must("[data-k=engine-aruco-badge]", HTMLDivElement, mount),
@@ -448,13 +437,9 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     }
 
     text(count, String(next.markers.length));
-    text(dictionary, `DICT ${next.dictionaryName} · APRILTAG 3 PRIMARY`);
     reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes);
     paintEngine(apriltagEngine, next.comparison?.engines[0] ?? null);
     paintEngine(arucoEngine, next.comparison?.engines[1] ?? null);
-    text(frame, next.frameSize === null ? "--" : `${next.frameSize.width} × ${next.frameSize.height} px`);
-    text(analysis, next.analysisMs === null ? "--" : `${next.analysisMs.toFixed(1)} ms`);
-    text(received, next.recvEpochUs === null ? "--" : `${next.recvEpochUs} µs`);
   };
 
   const onClick = (event: MouseEvent): void => {

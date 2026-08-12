@@ -36,6 +36,9 @@ export type StationModel = {
   ipcMs: number | null;
   /** Decoder-only latency, so the remainder of `rttMs` is ours. */
   decodeMs: number | null;
+  /** Painted frames in the last second - the pipeline's own output rate, which
+   *  is not the link's arrival rate and must not be read as it. */
+  fps: number | null;
   bat: number | null;
   /** Motor-on seconds, straight off the drone's state datagram. */
   flightS: number | null;
@@ -122,10 +125,6 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
         <div data-k="tello-dot" class="${HEADER_DOT} bg-dim3"></div>
         <div class="font-mono text-[11px] text-ink2">TELLO <span data-k="tello">--</span></div>
       </div>
-      <div class="${CHIP}">
-        <div class="font-mono text-[11px] text-dim2">RECV&rarr;PAINT</div>
-        <div class="font-mono text-[11px] text-ink2"><span data-k="rtt">--</span> ms</div>
-      </div>
 
       <div class="flex-1"></div>
 
@@ -196,6 +195,10 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       </div>
     </div>
 
+    <!-- One strip, one subject: everything here measures the pipeline that
+         carries the picture, left to right in the order the bytes travel -
+         off the wire, through the IPC hop, through the decoder, onto the
+         canvas. Nothing about the aircraft belongs here. -->
     <div class="h-[26px] flex-none border-t border-line bg-[#0D1014] flex items-center px-[14px] gap-[18px] font-mono text-[10.5px] text-dim2">
       <div data-k="status" class="text-dim">idle</div>
       <div class="flex-1"></div>
@@ -204,6 +207,8 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       <div>GAP <span data-k="gap">--</span> ms</div>
       <div>IPC <span data-k="ipc">--</span> ms</div>
       <div>DEC <span data-k="dec">--</span> ms</div>
+      <div>PAINT <span data-k="rtt">--</span> ms</div>
+      <div><span data-k="fps">--</span> fps</div>
       <div>DROP <span data-k="drop">--</span></div>
       <div data-k="link" class="text-dim2">LINK IDLE</div>
     </div>
@@ -241,6 +246,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     flight: q("flight", HTMLDivElement),
     status: q("status", HTMLDivElement),
     rx: q("rx", HTMLSpanElement),
+    fps: q("fps", HTMLSpanElement),
     mbps: q("mbps", HTMLSpanElement),
     gap: q("gap", HTMLSpanElement),
     ipc: q("ipc", HTMLSpanElement),
@@ -353,8 +359,8 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       cell.nodeDot.className = `${HEADER_DOT} ${nodeLive ? "bg-ok animate-beat" : "bg-dim3"}`;
       cell.telloDot.className = `${HEADER_DOT} ${telloLive ? "bg-ok" : "bg-dim3"}`;
 
-      const receiveToPaint = finite(m.rttMs);
-      text(cell.rtt, receiveToPaint === null ? MISSING : receiveToPaint.toFixed(1));
+      // Battery and flight time are the only aircraft readings up here; every
+      // measurement of the picture's own path lives in the strip below.
 
       // Battery is the one readout that changes colour, and it uses the drone's
       // own thresholds: a Tello's SDK channel gets unreliable well before the
@@ -375,16 +381,20 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       const rx = finite(m.rxPktsPerSec);
       const mbps = finite(m.mbps);
       const gap = finite(m.gapMaxMs);
+      const ipc = finite(m.ipcMs);
+      const dec = finite(m.decodeMs);
+      const receiveToPaint = finite(m.rttMs);
+      const fps = finite(m.fps);
       const dropped = finite(m.dropped);
       text(cell.rx, rx === null ? MISSING : String(rx));
       text(cell.mbps, mbps === null ? MISSING : mbps.toFixed(2));
       text(cell.gap, gap === null ? MISSING : String(gap));
-      const ipc = finite(m.ipcMs);
       text(cell.ipc, ipc === null ? MISSING : ipc.toFixed(1));
+      text(cell.dec, dec === null ? MISSING : dec.toFixed(1));
+      text(cell.rtt, receiveToPaint === null ? MISSING : receiveToPaint.toFixed(1));
+      text(cell.fps, fps === null || fps <= 0 ? MISSING : String(Math.round(fps)));
       text(cell.drop, dropped === null ? MISSING : String(dropped));
 
-      const dec = finite(m.decodeMs);
-      text(cell.dec, dec === null ? MISSING : dec.toFixed(1));
       text(cell.link, !m.live ? "LINK IDLE" : m.linkOk ? "LINK STABLE" : "LINK SILENT");
       cell.link.className = !m.live ? "text-dim2" : m.linkOk ? "text-ok" : "text-alert";
     },

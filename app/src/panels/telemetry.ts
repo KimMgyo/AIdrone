@@ -1,58 +1,47 @@
 /**
- * The left panel's TELEMETRY block: nine tiles straight off the Tello state
- * datagram, plus three attitude tracks.
+ * The left panel's TELEMETRY block: the drone's own state, in the SDK's own
+ * units, and nothing else.
  *
- * Every number is printed in the SDK's own unit and nothing is converted here.
- * `h`, `tof` and `baro` are documented in cm so they say cm; `vgx/vgy/vgz` have
- * NO documented unit in SDK 2.0, so they carry no unit label at all - printing
- * a guessed cm/s next to a velocity on a flight display is worse than admitting
- * the datagram never said. (The HUD's metre conversion for altitude is safe
- * only because `h` is documented; that licence does not extend to anything
- * else, so no arithmetic happens in this file beyond fixed-point formatting.)
+ * What is NOT here is deliberate. Battery and flight time live in the top bar,
+ * altitude and heading in the HUD over the picture, and every link/pipeline
+ * rate in the status bar - each fact has exactly one home, so a glance at two
+ * places can never disagree. This block holds what those three cannot: the
+ * readings you consult rather than fly by.
+ *
+ * `tof` and `baro` are documented in cm so they say cm; `vgx/vgy/vgz` have NO
+ * documented unit in SDK 2.0, so they carry no unit label at all - printing a
+ * guessed cm/s next to a velocity on a flight display is worse than admitting
+ * the datagram never said. No arithmetic happens in this file beyond
+ * fixed-point formatting.
  *
  * An absent field renders `--`, never 0. Firmware revisions omit fields and a
- * half-parsed datagram must not read as "on the ground, stationary, 0 %
- * battery". `update(null)` blanks every cell for the same reason: no session is
- * not a reading.
+ * half-parsed datagram must not read as "on the ground, stationary". A cell
+ * with no source at all does not belong here in any form: WIFI and LOSS were
+ * such cells, printed `--` forever, and they are gone rather than pretending
+ * to be instruments that were merely quiet.
  */
 import type { DroneState } from "../transport.ts";
-import { all, cls, style, text } from "../ui.ts";
-
-/**
- * Link measurements that the state datagram cannot carry. A missing value is
- * deliberately different from zero: the grid must not turn "not measured" into
- * a measurement just to fill a prototype cell.
- */
-export type TelemetryRates = {
-  /** Receiver-side frame rate derived from real video counters. */
-  fps?: number | null;
-};
+import { all, style, text } from "../ui.ts";
 
 export interface TelemetryPanel {
-  /** `null` is the no-session state and blanks every state-backed cell. */
-  update(s: DroneState | null, rates?: TelemetryRates): void;
+  /** `null` blanks every cell: no session is not a reading. */
+  update(state: DroneState | null): void;
 }
 
 const MISSING = "--";
 
-/** Split out because the battery cell is the only one whose colour moves, so
- *  its className is rebuilt on every tick and has to agree with the markup. */
-const TILE_VALUE = "font-mono text-[14px]";
+/** Every tile prints the same way; nothing on this panel changes colour, since
+ *  the one reading with a threshold - battery - is the top bar's. */
+const TILE_VALUE = "font-mono text-[14px] text-ink";
 
-/** The prototype's ten-cell grid, with only fields the station can substantiate
- * bound below. WIFI and LOSS have no source on this link, so they stay `--`;
- * FPS has an optional real receiver-side measurement. */
+/** Six cells, all of them substantiated by the state datagram. */
 const TILES: readonly { k: string; label: string; unit: string }[] = [
-  { k: "bat", label: "BATT", unit: "%" },
-  { k: "alt", label: "ALT", unit: "m" },
-  { k: "flight", label: "FLIGHT", unit: "s" },
+  { k: "tof", label: "TOF", unit: "cm" },
+  { k: "baro", label: "BARO", unit: "cm" },
   { k: "temp", label: "TEMP", unit: "°C" },
   { k: "vgx", label: "VX", unit: "" },
   { k: "vgy", label: "VY", unit: "" },
   { k: "vgz", label: "VZ", unit: "" },
-  { k: "wifi", label: "WIFI", unit: "snr" },
-  { k: "fps", label: "FPS", unit: "" },
-  { k: "loss", label: "LOSS", unit: "%" },
 ];
 
 /**
@@ -129,36 +118,28 @@ export function installTelemetry(mount: HTMLElement): TelemetryPanel {
         <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">TELEMETRY</div>
       </div>
       <div class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-[14px] pb-[12px] flex flex-col gap-[10px]">
-        <div class="flex-none grid grid-cols-[repeat(auto-fit,minmax(70px,1fr))] gap-px bg-line2 border border-line2 rounded-[3px] overflow-hidden">${tiles}
+        <!-- Exactly three columns for exactly six cells: an auto-fit grid left
+             a half-empty seventh cell as soon as the dead readouts went. -->
+        <div class="flex-none grid grid-cols-3 gap-px bg-line2 border border-line2 rounded-[3px] overflow-hidden">${tiles}
         </div>${rows}
       </div>
     </div>
   `;
 
-  const [vBat, vAlt, vFlight, vTemp, vVgx, vVgy, vVgz, vWifi, vFps, vLoss] = all(
-    "[data-t]",
-    HTMLDivElement,
-    mount,
-    TILES.length,
-  );
+  const [vTof, vBaro, vTemp, vVgx, vVgy, vVgz] = all("[data-t]", HTMLDivElement, mount, TILES.length);
   const attValues = all("[data-a]", HTMLDivElement, mount, ATT.length);
   const needles = all("[data-n]", HTMLDivElement, mount, ATT.length);
 
   const panel: TelemetryPanel = {
-    update(s, rates) {
-      text(vBat, num(s?.bat, 0));
-      cls(vBat, `${TILE_VALUE} ${batTone(s?.bat)}`);
-      text(vAlt, metres(s?.h));
-      text(vFlight, num(s?.time, 0));
+    update(s) {
+      text(vTof, num(s?.tof, 0));
+      text(vBaro, num(s?.baro, 0));
       text(vTemp, tempRange(s?.templ, s?.temph));
       // The SDK names these fields vgx/vgy/vgz but documents no unit. Their
       // raw values are real; printing m/s beside them would not be.
       text(vVgx, num(s?.vgx, 0));
       text(vVgy, num(s?.vgy, 0));
       text(vVgz, num(s?.vgz, 0));
-      text(vWifi, MISSING);
-      text(vFps, rate(rates?.fps));
-      text(vLoss, MISSING);
 
       for (let i = 0; i < ATT.length; i++) {
         const a = ATT[i];
@@ -185,40 +166,12 @@ function num(v: number | null | undefined, dp: number): string {
   return n === null ? MISSING : n.toFixed(dp);
 }
 
-/** Tello's `h` is documented in centimetres; the station's ALT cell is metres. */
-function metres(cm: number | undefined): string {
-  const value = fin(cm);
-  if (value === null) return MISSING;
-  return (value / 100).toFixed(2);
-}
-
-/** A zero receiver rate is the pre-measurement / stopped-stream sentinel, not
- * a completed FPS sample. */
-function rate(v: number | null | undefined): string {
-  const value = fin(v);
-  if (value === null || value <= 0) return MISSING;
-  return value.toFixed(0);
-}
-
 /** `templ`/`temph` are the two ends of one board-temperature range, so one
  *  without the other is not a range and there is nothing honest to print. */
 function tempRange(lo: number | undefined, hi: number | undefined): string {
   const a = fin(lo);
   const b = fin(hi);
   return a === null || b === null ? MISSING : `${a.toFixed(0)}-${b.toFixed(0)}`;
-}
-
-/**
- * The one threshold colour on the panel. 30 % is where a Tello still has a
- * comfortable return margin, 15 % is where it starts refusing to take off, and
- * everything else on screen stays neutral so that this cell is the only thing
- * that can go red. A blank battery is not an alert - `--` stays `text-ink`.
- */
-function batTone(bat: number | undefined): string {
-  const v = fin(bat);
-  if (v === null) return "text-ink";
-  if (v >= 30) return "text-ok";
-  return v >= 15 ? "text-warn" : "text-alert";
 }
 
 /**

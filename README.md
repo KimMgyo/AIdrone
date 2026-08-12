@@ -945,6 +945,36 @@ The production build verified for this UI emitted 108.75 kB JavaScript
 unicode-split IBM Plex Sans KR font assets; neither figure represents runtime
 framework work.
 
+### Every fact has exactly one place on screen
+
+Readouts had accumulated in whichever panel was being written at the time, so
+the same number appeared two and three times and drifted apart between copies.
+The rule now is that a reading is owned by one surface, and a second copy is a
+defect rather than a convenience:
+
+| Surface | Owns |
+|---|---|
+| Top bar | Link identity - NODE, TELLO, BATTERY, FLIGHT |
+| Status bar | The picture's own pipeline, in wire order: `RX`, `Mb/s`, `GAP`, `IPC`, `DEC`, `PAINT`, `fps`, `DROP`, link verdict |
+| Video overlay | What is true of the frame under it - `960×720 · 4:3`, ALT/SPD/YAW, detection boxes |
+| TELEMETRY panel | The drone's own state datagram, in the SDK's own units: TOF, BARO, TEMP, VX/VY/VZ, attitude |
+| Vision panels | The detections themselves; the status line carries engine, count and analysis time |
+| Follow card | What the loop is putting on the wire, and the authority it is doing it with |
+
+Two consequences worth stating, because both removed working code:
+
+- **A cell with no source does not belong on screen in any form.** WIFI and
+  LOSS printed `--` forever - the Tello state datagram carries neither - and
+  were deleted rather than left to look like instruments that were merely
+  quiet. The same went for a raw `recvEpochUs` printed in microseconds, which
+  no operator could read, and for the frame size and analysis time that the
+  vision panels repeated under a "NATIVE OBSERVATION FACTS" heading.
+- **A number printed twice is single-sourced or dropped.** Manual full
+  deflection appeared as a bare `60` in two strings on one card; it is now
+  `DEFLECTION`, exported from `panels/keymap.ts`, printed once beside the
+  follow loop's own `maxRc` because the comparison is the only reason either
+  number is there.
+
 ### Native vision stays off the WebView's pixel path
 
 `render.ts` only decodes and paints. It does not call `getImageData()` or run a
@@ -1452,8 +1482,8 @@ The honest consequence: **the displayed number barely moved and the picture
 got visibly better**, because what was removed had never been counted.
 
 **What the status bar now separates.** `IPC` is Rust's arrival stamp to the
-WebView's hands, `DEC` is `decode()` to `output()`, and `RECV→PAINT` is the
-whole thing; the remainder is ours. On the drone, on that laptop: 2 / 9 / 18.
+WebView's hands, `DEC` is `decode()` to `output()`, and `PAINT` is the whole
+thing; the remainder is ours. On the drone, on that laptop: 2 / 9 / 18.
 The 9 ms is WebKitGTK's own libav decode on an i7-10750H - roughly nine times
 the same decode on a 13700K, and the only remaining lever there is moving
 decode into Rust on Linux, which trades the WebCodecs architecture for it.
