@@ -975,6 +975,26 @@ Two consequences worth stating, because both removed working code:
   follow loop's own `maxRc` because the comparison is the only reason either
   number is there.
 
+The same rule ran over the two vision panels and the follow card, which had
+accumulated a paragraph of instructions each. Nothing on those three surfaces
+is a sentence any more - a status line reads `AprilTag 3 · 1개 · 1.4 ms` or
+`프레임 대기`, an empty list reads `감지 없음`, and the follow card is a phase
+badge over three measured lines. The prose was not replaced by shorter prose;
+it was deleted, because every one of those sentences described a state the
+panel was already showing:
+
+- `ENGAGEMENT`, four strings per accent explaining what starts and stops the
+  loop, is gone: the badge already reads 정지 / 대상 탐색 / 추적 중 / 중단됨,
+  and the detail line now appears **only** while following, carrying the two
+  channel values and nothing else.
+- The marker row no longer ends in `크기 입력 필요`. The size box is the last
+  thing on that same row, and an empty one says it.
+- The `해제` button is hidden unless a target is locked, so the panel's one
+  control is absent exactly when it would do nothing.
+- The person list rows were `<button>`s with hover and pointer styling and no
+  click handler - person mode follows whoever is nearest, so there was never a
+  selection to make. They are plain rows now.
+
 One repeat survives on purpose. `yaw` is both a HUD cell and one of the
 panel's three attitude needles, because heading over the picture is what a
 pilot reads and splitting the pitch/roll/yaw triple to avoid it would be the

@@ -3,8 +3,8 @@
  *
  * There is no button here. The lock IS the switch: locking a target starts the
  * follow loop and releasing it stops the drone, so a second control would only
- * be a second thing to disagree with. This card exists so the operator can see
- * which of those two states they are in, and what is on the wire because of it.
+ * be a second thing to disagree with. The card is four readings and a badge -
+ * the phase word carries what prose used to, so no line here explains itself.
  */
 import { type FollowPhase, type FollowPort, type FollowState } from "../follow.ts";
 import { cls, must, text } from "../ui.ts";
@@ -12,26 +12,6 @@ import { DEFLECTION } from "./keymap.ts";
 
 /** Each panel keeps its own accent so the two stay tellable apart. */
 export type FollowAccent = "warn" | "ok";
-
-/**
- * What starts the loop, and therefore what stops it, which differs by panel
- * and so cannot be inferred from the controller: a marker is followed once the
- * operator locks its id, while a person is followed the moment one is in frame.
- */
-const ENGAGEMENT: Record<FollowAccent, { idle: string; searching: string; halted: string; footnote: string }> = {
-  warn: {
-    idle: "대상을 잠그면 그때부터 따라갑니다.",
-    searching: "잠금 유지 · 대상이 화면에 없어 스틱 중립 · 다시 보이면 자동 재개",
-    halted: "비상 정지 또는 모드 변경으로 중단됨 · 잠금을 해제했다가 다시 잠그면 재개",
-    footnote: "잠그면 따라갑니다 · 해제하면 멈춥니다",
-  },
-  ok: {
-    idle: "사람이 화면에 들어오면 바로 따라갑니다 · 멈추려면 모드를 바꾸세요.",
-    searching: "사람이 화면에서 사라져 스틱 중립 · 다시 보이면 자동 재개",
-    halted: "비상 정지 또는 모드 변경으로 중단됨 · 사람 모드로 다시 들어오면 재개",
-    footnote: "사람이 보이면 따라갑니다 · 모드를 바꾸면 멈춥니다",
-  },
-};
 
 export interface FollowControl {
   dispose(): void;
@@ -59,14 +39,13 @@ export function installFollowControl(mount: HTMLElement, accent: FollowAccent, f
       <div class="flex items-center justify-between gap-[8px]">
         <div class="flex min-w-0 items-center gap-[7px]">
           <div data-k="follow-dot" class="${DOT} bg-dim3"></div>
-          <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">AUTONOMOUS FOLLOW</div>
+          <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">FOLLOW</div>
         </div>
         <div data-k="follow-badge" class="${BADGE} border border-line3 text-dim2">정지</div>
       </div>
-      <div data-k="follow-detail" class="mt-[7px] text-[11px] leading-[1.55] text-dim"></div>
-      <div data-k="follow-distance" class="mt-[5px] font-mono text-[10px] leading-[1.5] text-dim2">거리 --</div>
-      <div data-k="follow-power" class="mt-[7px] font-mono text-[10px] leading-[1.5] text-dim2">POWER --</div>
-      <div class="mt-[6px] font-mono text-[9.5px] leading-[1.5] text-dim2">${ENGAGEMENT[accent].footnote} · yaw·전후 2채널 (roll/상하 0)</div>
+      <div data-k="follow-detail" class="mt-[6px] font-mono text-[10px] leading-[1.5] text-dim" hidden></div>
+      <div data-k="follow-distance" class="mt-[5px] font-mono text-[10px] leading-[1.5] text-dim2">폭 --</div>
+      <div data-k="follow-power" class="mt-[3px] font-mono text-[10px] leading-[1.5] text-dim2">POWER --</div>
     </div>
   `;
 
@@ -83,19 +62,21 @@ export function installFollowControl(mount: HTMLElement, accent: FollowAccent, f
    * setpoint it is being compared against are both on screen.
    */
   const paintDistance = (state: FollowState): void => {
-    const measured = state.targetSize === null ? "--" : `${Math.round(state.targetSize)} px`;
+    const measured = state.targetSize === null ? "--" : `${Math.round(state.targetSize)}`;
     // The ratio is the number the control law actually acts on, and it is the
     // one an operator can sanity-check against what they can see.
     const ratio =
       state.targetSize === null || state.targetSize <= 0
         ? ""
         : ` · ${(state.desiredSize / state.targetSize).toFixed(2)}× ${state.desiredSize > state.targetSize ? "멂" : "가까움"}`;
-    text(distance, `폭 ${measured} → 목표 ${Math.round(state.desiredSize)} px (고정)${ratio}`);
+    text(distance, `폭 ${measured} → ${Math.round(state.desiredSize)} px${ratio}`);
   };
   const power = must("[data-k=follow-power]", HTMLDivElement, mount);
   const paint = (state: FollowState): void => {
     text(badge, LABEL[state.phase]);
-    const grounded = state.airborne === false;
+    // Only `following` has anything to add that the badge does not already
+    // say, so every other phase leaves the line off rather than restating it.
+    detail.hidden = state.phase !== "following";
     switch (state.phase) {
       case "following":
         cls(card, `${CARD} border-alert/60 bg-alert/10`);
@@ -105,28 +86,23 @@ export function installFollowControl(mount: HTMLElement, accent: FollowAccent, f
         // channel values at a motionless airframe would be a lie of omission.
         text(
           detail,
-          grounded
-            ? `드론이 지상에 있습니다 · takeoff 전에는 rc가 무시됩니다 (전후 ${state.command.fb} · yaw ${state.command.yaw})`
-            : `자동 조종 중 · 전후 ${state.command.fb} · yaw ${state.command.yaw}`,
+          `${state.airborne === false ? "지상 · rc 무시됨 · " : ""}전후 ${state.command.fb} · yaw ${state.command.yaw}`,
         );
         return;
       case "searching":
         cls(card, `${CARD} border-alert/40 bg-alert/5`);
         cls(dot, `${DOT} bg-alert animate-beat`);
         cls(badge, `${BADGE} border border-alert/45 text-alert2`);
-        text(detail, ENGAGEMENT[accent].searching);
         return;
       case "halted":
         cls(card, `${CARD} border-line4 bg-raised`);
         cls(dot, `${DOT} bg-dim`);
         cls(badge, `${BADGE} border border-line4 text-dim`);
-        text(detail, ENGAGEMENT[accent].halted);
         return;
       case "idle":
         cls(card, IDLE_CARD[accent]);
         cls(dot, `${DOT} bg-dim3`);
         cls(badge, `${BADGE} border border-line3 text-dim2`);
-        text(detail, ENGAGEMENT[accent].idle);
     }
   };
 
@@ -136,7 +112,7 @@ export function installFollowControl(mount: HTMLElement, accent: FollowAccent, f
     paint(state);
     // Manual deflection is printed here and nowhere else on this card: the
     // number only means something next to the loop's own authority.
-    text(power, `POWER ${state.maxRc} (고정) · 수동 조종은 ${DEFLECTION}`);
+    text(power, `POWER ${state.maxRc} · 수동 ${DEFLECTION}`);
     paintDistance(state);
   });
   return {

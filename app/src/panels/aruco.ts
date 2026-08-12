@@ -76,7 +76,6 @@ type EngineView = Readonly<{
   badge: HTMLDivElement;
   timing: HTMLDivElement;
   ids: HTMLDivElement;
-  confidence: HTMLDivElement;
   detail: HTMLDivElement;
 }>;
 
@@ -101,41 +100,38 @@ const ENGINE_TONE: Record<EnginePanelState, { card: string; badge: string }> = {
   },
 };
 
-function engineIds(result: VisionArucoEngineResult): string {
-  return result.markers.length === 0
-    ? "없음"
-    : result.markers.map((marker) => `ID ${marker.id} · H ${marker.hammingDistance}`).join(" / ");
-}
-
-function engineConfidence(result: VisionArucoEngineResult): string {
-  if (result.engine === "aruco-rs") return "n/a · aruco-rs does not emit confidence";
-  return result.markers.length === 0
-    ? "없음"
-    : result.markers
-      .map((marker) => `ID ${marker.id}: ${marker.decisionMargin === undefined ? "--" : marker.decisionMargin.toFixed(1)}`)
-      .join(" / ");
+/** Ids with the two numbers that qualify them: hamming, and AprilTag's own
+ *  decision margin. aruco-rs publishes no margin, so it simply has none. */
+function engineSummary(result: VisionArucoEngineResult): string {
+  if (result.markers.length === 0) return "없음";
+  return result.markers
+    .map((marker) => {
+      const margin =
+        result.engine === "aruco-rs" || marker.decisionMargin === undefined ? "" : ` · M ${marker.decisionMargin.toFixed(0)}`;
+      return `ID ${marker.id} · H${marker.hammingDistance}${margin}`;
+    })
+    .join(" / ");
 }
 
 function paintEngine(view: EngineView, result: VisionArucoEngineResult | null): void {
   const state: EnginePanelState = result?.state ?? "waiting";
   const tone = ENGINE_TONE[state];
-  cls(view.card, `rounded-[3px] border p-[9px] ${tone.card}`);
-  cls(view.badge, `rounded-[2px] px-[6px] py-[2px] font-mono text-[8.5px] tracking-[.1em] ${tone.badge}`);
+  cls(view.card, `rounded-[3px] border px-[9px] py-[7px] ${tone.card}`);
+  cls(view.badge, `flex-none rounded-[2px] px-[5px] py-[1px] font-mono text-[8.5px] tracking-[.1em] ${tone.badge}`);
   text(view.badge, ENGINE_STATE_LABEL[state]);
   text(view.timing, result === null ? "--" : `${result.analysisMs.toFixed(1)} ms`);
-  text(view.ids, result === null || result.state === "error" ? "--" : engineIds(result));
-  text(view.confidence, result === null || result.state === "error" ? "--" : engineConfidence(result));
+  text(view.ids, result === null || result.state === "error" ? "--" : engineSummary(result));
   const detail = result?.state === "error" ? result.detail : undefined;
   view.detail.hidden = detail === undefined;
   if (detail !== undefined) text(view.detail, detail);
 }
 
-/** Why the empty list says nothing at all, when it says something. */
+/** A state word, not a sentence: the empty list is a reading like any other. */
 function emptyMarkerNote(state: ArucoVisionState): string | null {
-  if (!state.active) return "연결된 세션에서 ArUco 모드를 선택하면 native detector 결과를 표시합니다.";
-  if (state.recvEpochUs === null) return "native detector의 첫 번째 ArUco 결과를 기다리는 중입니다.";
-  if (state.comparison?.engines[0].state === "error") return "AprilTag 3 detector가 이 프레임을 분석하지 못했습니다. 비교 결과를 확인하세요.";
-  if (state.markers.length === 0) return "최신 AprilTag 3 결과에 감지된 마커가 없습니다.";
+  if (!state.active) return "비활성";
+  if (state.recvEpochUs === null) return "결과 대기";
+  if (state.comparison?.engines[0].state === "error") return "AprilTag 3 오류";
+  if (state.markers.length === 0) return "감지 없음";
   return null;
 }
 
@@ -269,10 +265,9 @@ function reconcileMarkerRows(
     text(row.chip, String(marker.id));
     text(row.title, `ID ${marker.id}`);
     const facts = `H ${marker.hammingDistance} · ${Math.round(metrics.area)} px² · (${Math.round(metrics.centerX)}, ${Math.round(metrics.centerY)})`;
-    text(
-      row.facts,
-      sizeCm === null ? `${facts} · 크기 입력 필요` : `${facts} · ${sizeCm} cm → 목표 ${Math.round(markerTargetPx(sizeCm))} px`,
-    );
+    // No "measure this first" hint: the size box sits at the end of this very
+    // row, and an empty one says it without spending a line saying it.
+    text(row.facts, sizeCm === null ? facts : `${facts} · ${sizeCm} cm → ${Math.round(markerTargetPx(sizeCm))} px`);
     row.tag.hidden = !selected;
 
     // The registry owns this field only while the operator is not using it.
@@ -296,95 +291,73 @@ function reconcileMarkerRows(
   }
 }
 
+/** A fragment, never a sentence. The status line is a reading; anything that
+ *  had to be explained in prose did not belong on the panel. */
 function detectorStatus(state: ArucoVisionState): string {
-  if (!state.active) return "Native ArUco detector가 비활성입니다.";
+  if (!state.active) return "비활성";
   if (state.status?.state === "error") {
-    return state.status.detail === undefined
-      ? "Native ArUco detector 오류가 보고되었습니다."
-      : `Native ArUco detector 오류 · ${state.status.detail}`;
+    return state.status.detail === undefined ? "오류" : `오류 · ${state.status.detail}`;
   }
-  if (state.status?.state === "inactive") return "Native ArUco detector가 비활성 상태를 보고했습니다.";
-  if (state.status?.state === "waitingFrame") return "Native ArUco detector가 디코드 프레임을 기다리는 중입니다.";
+  if (state.status?.state === "inactive") return "비활성";
+  if (state.status?.state === "waitingFrame") return "프레임 대기";
   const primary = state.comparison?.engines[0] ?? null;
   if (primary?.state === "error") {
-    return primary.detail === undefined ? "AprilTag 3 분석 오류" : `AprilTag 3 오류 · ${primary.detail}`;
+    return primary.detail === undefined ? "AprilTag 3 오류" : `AprilTag 3 오류 · ${primary.detail}`;
   }
-  if (state.recvEpochUs === null) {
-    return state.status?.state === "ready"
-      ? "Native ArUco detector 준비됨 · 첫 결과 대기 중"
-      : "Native ArUco detector 모드 요청됨 · 상태 이벤트 대기 중";
-  }
-  return `AprilTag 3 결과 ${state.markers.length}개 · 분석 ${state.analysisMs === null ? "--" : `${state.analysisMs.toFixed(1)} ms`}`;
+  if (state.recvEpochUs === null) return "결과 대기";
+  return `AprilTag 3 · ${state.markers.length}개 · ${state.analysisMs === null ? "--" : `${state.analysisMs.toFixed(1)} ms`}`;
 }
 
 export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): ArucoPanel {
   mount.innerHTML = `
-    <section class="flex h-full min-h-0 flex-col gap-[13px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="ArUco marker detector">
-      <div data-k="status-box" role="status" class="flex min-h-[32px] items-center gap-[8px] rounded-[3px] border px-[11px]">
+    <section class="flex h-full min-h-0 flex-col gap-[10px] overflow-y-auto overflow-x-hidden p-[14px]" aria-label="ArUco marker detector">
+      <div data-k="status-box" role="status" class="flex min-h-[30px] items-center gap-[8px] rounded-[3px] border px-[10px]">
         <div data-k="status-dot" class="h-[6px] w-[6px] flex-none rounded-full"></div>
-        <div data-k="status" class="min-w-0 text-[11.5px]"></div>
+        <div data-k="status" class="min-w-0 flex-1 truncate text-[11.5px]"></div>
+        <div class="flex-none font-mono text-[9px] tracking-[.1em] text-dim2">${NATIVE_ARUCO_DICTIONARY}</div>
       </div>
-      <div class="text-[11px] leading-[1.6] text-dim2">동일 프레임의 native A/B 관측 · ${NATIVE_ARUCO_DICTIONARY} · 선택·오버레이는 AprilTag 3만 사용합니다 · 잠그면 자동 추적이 시작됩니다.</div>
 
-      <div class="flex items-center gap-[10px] rounded-[3px] border border-[#2A2418] border-l-2 border-l-warn bg-sunken px-[11px] py-[10px]">
-        <div data-k="target-id" class="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-[2px] border border-warn/45 font-mono text-[10px] text-warn">--</div>
-        <div class="min-w-0 flex-1">
-          <div class="flex items-baseline gap-[7px]">
-            <div class="font-mono text-[9.5px] tracking-[.14em] text-dim2">PRESENTATION TARGET</div>
-            <div data-k="target-title" class="font-mono text-[14px] text-warn">ID --</div>
-          </div>
-          <div data-k="target-detail" class="truncate text-[11px] text-dim">대상 미선택</div>
-        </div>
-        <div data-k="target-badge" class="flex-none rounded-[2px] px-[7px] py-[3px] font-mono text-[9px] tracking-[.1em]">--</div>
+      <div class="flex items-center gap-[8px] rounded-[3px] border border-[#2A2418] border-l-2 border-l-warn bg-sunken px-[10px] py-[8px]">
+        <div class="flex-none font-mono text-[9.5px] tracking-[.14em] text-dim2">TARGET</div>
+        <div data-k="target-title" class="min-w-0 flex-1 truncate font-mono text-[13px] text-warn">--</div>
+        <div data-k="target-badge" class="flex-none rounded-[2px] px-[6px] py-[2px] font-mono text-[9px] tracking-[.1em]">--</div>
+        <button data-k="clear" type="button" data-action="clear-target" hidden class="h-[21px] flex-none rounded-[2px] border border-line4 bg-key px-[7px] font-mono text-[9.5px] text-dim cursor-pointer hover:bg-btn hover:text-ink2">해제</button>
       </div>
-      <button type="button" data-action="clear-target" class="h-[27px] rounded-[3px] border border-line4 bg-key px-[9px] font-mono text-[10px] text-dim cursor-pointer hover:bg-btn hover:text-ink2">CLEAR PRESENTATION TARGET</button>
       <div data-k="follow-mount"></div>
 
       <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">DETECTED · <span data-k="count">0</span></div>
-      <div data-k="marker-note" class="rounded-[3px] border border-line2 bg-sunken px-[10px] py-[10px] text-[11px] leading-[1.6] text-dim2" hidden></div>
+      <div data-k="marker-note" class="font-mono text-[10.5px] text-dim2" hidden></div>
       <div data-k="marker-list" class="flex flex-col gap-[6px]"></div>
 
-      <div class="h-px bg-line2"></div>
-      <div class="font-mono text-[10.5px] tracking-[.16em] text-dim2">SAME-FRAME ENGINE COMPARISON</div>
-      <div class="grid grid-cols-1 gap-[7px]">
-        <div data-k="engine-apriltag-card" class="rounded-[3px] border p-[9px]">
-          <div class="flex items-center justify-between gap-[8px]">
-            <div class="font-mono text-[10px] tracking-[.1em] text-ink2">APRILTAG 3 · PRIMARY</div>
+      <div class="flex flex-col gap-[5px] border-t border-line2 pt-[9px]">
+        <div data-k="engine-apriltag-card" class="rounded-[3px] border">
+          <div class="flex items-baseline gap-[7px] font-mono text-[10px] leading-[1.5]">
+            <div class="w-[62px] flex-none tracking-[.1em] text-ink2">APRILTAG3</div>
+            <div data-k="engine-apriltag-time" class="w-[48px] flex-none text-ink">--</div>
+            <div data-k="engine-apriltag-ids" class="min-w-0 flex-1 truncate text-dim">--</div>
             <div data-k="engine-apriltag-badge"></div>
           </div>
-          <div class="mt-[7px] grid grid-cols-[68px_minmax(0,1fr)] gap-x-[8px] gap-y-[4px] font-mono text-[10px] leading-[1.45]">
-            <div class="text-dim2">TIME</div><div data-k="engine-apriltag-time" class="text-ink">--</div>
-            <div class="text-dim2">IDS / H</div><div data-k="engine-apriltag-ids" class="break-words text-ink">--</div>
-            <div class="text-dim2">CONF</div><div data-k="engine-apriltag-confidence" class="break-words text-dim">--</div>
-          </div>
-          <div data-k="engine-apriltag-detail" hidden class="mt-[7px] break-words border-t border-alert/25 pt-[6px] font-mono text-[9px] leading-[1.45] text-alert2"></div>
+          <div data-k="engine-apriltag-detail" hidden class="mt-[5px] break-words font-mono text-[9px] leading-[1.45] text-alert2"></div>
         </div>
-        <div data-k="engine-aruco-card" class="rounded-[3px] border p-[9px]">
-          <div class="flex items-center justify-between gap-[8px]">
-            <div class="font-mono text-[10px] tracking-[.1em] text-ink2">ARUCO-RS · COMPARISON</div>
+        <div data-k="engine-aruco-card" class="rounded-[3px] border">
+          <div class="flex items-baseline gap-[7px] font-mono text-[10px] leading-[1.5]">
+            <div class="w-[62px] flex-none tracking-[.1em] text-ink2">ARUCO-RS</div>
+            <div data-k="engine-aruco-time" class="w-[48px] flex-none text-ink">--</div>
+            <div data-k="engine-aruco-ids" class="min-w-0 flex-1 truncate text-dim">--</div>
             <div data-k="engine-aruco-badge"></div>
           </div>
-          <div class="mt-[7px] grid grid-cols-[68px_minmax(0,1fr)] gap-x-[8px] gap-y-[4px] font-mono text-[10px] leading-[1.45]">
-            <div class="text-dim2">TIME</div><div data-k="engine-aruco-time" class="text-ink">--</div>
-            <div class="text-dim2">IDS / H</div><div data-k="engine-aruco-ids" class="break-words text-ink">--</div>
-            <div class="text-dim2">CONF</div><div data-k="engine-aruco-confidence" class="break-words text-dim">--</div>
-          </div>
-          <div data-k="engine-aruco-detail" hidden class="mt-[7px] break-words border-t border-alert/25 pt-[6px] font-mono text-[9px] leading-[1.45] text-alert2"></div>
+          <div data-k="engine-aruco-detail" hidden class="mt-[5px] break-words font-mono text-[9px] leading-[1.45] text-alert2"></div>
         </div>
       </div>
-      <!-- No observation-facts block: the frame size is the overlay's, the
-           analysis time is printed per engine right above, and a raw epoch in
-           microseconds was never a reading anyone could use. -->
     </section>
   `;
 
   const statusBox = must("[data-k=status-box]", HTMLDivElement, mount);
   const statusDot = must("[data-k=status-dot]", HTMLDivElement, mount);
   const status = must("[data-k=status]", HTMLDivElement, mount);
-  const targetId = must("[data-k=target-id]", HTMLDivElement, mount);
   const targetTitle = must("[data-k=target-title]", HTMLDivElement, mount);
-  const targetDetail = must("[data-k=target-detail]", HTMLDivElement, mount);
   const targetBadge = must("[data-k=target-badge]", HTMLDivElement, mount);
+  const clear = must("[data-k=clear]", HTMLButtonElement, mount);
   const count = must("[data-k=count]", HTMLSpanElement, mount);
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
@@ -394,7 +367,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     badge: must("[data-k=engine-aruco-badge]", HTMLDivElement, mount),
     timing: must("[data-k=engine-aruco-time]", HTMLDivElement, mount),
     ids: must("[data-k=engine-aruco-ids]", HTMLDivElement, mount),
-    confidence: must("[data-k=engine-aruco-confidence]", HTMLDivElement, mount),
     detail: must("[data-k=engine-aruco-detail]", HTMLDivElement, mount),
   };
   const apriltagEngine: EngineView = {
@@ -402,7 +374,6 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     badge: must("[data-k=engine-apriltag-badge]", HTMLDivElement, mount),
     timing: must("[data-k=engine-apriltag-time]", HTMLDivElement, mount),
     ids: must("[data-k=engine-apriltag-ids]", HTMLDivElement, mount),
-    confidence: must("[data-k=engine-apriltag-confidence]", HTMLDivElement, mount),
     detail: must("[data-k=engine-apriltag-detail]", HTMLDivElement, mount),
   };
 
@@ -411,30 +382,20 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const paint = (next: ArucoVisionState): void => {
     current = next;
     const tone = STATUS_TONE[next.target.state];
-    cls(statusBox, `flex min-h-[32px] items-center gap-[8px] rounded-[3px] border px-[11px] ${tone.box}`);
+    cls(statusBox, `flex min-h-[30px] items-center gap-[8px] rounded-[3px] border px-[10px] ${tone.box}`);
     cls(statusDot, `h-[6px] w-[6px] flex-none rounded-full ${tone.dot}`);
-    cls(targetBadge, `flex-none rounded-[2px] px-[7px] py-[3px] font-mono text-[9px] tracking-[.1em] ${tone.badge}`);
-    cls(status, `min-w-0 text-[11.5px] ${tone.copy}`);
+    cls(targetBadge, `flex-none rounded-[2px] px-[6px] py-[2px] font-mono text-[9px] tracking-[.1em] ${tone.badge}`);
+    cls(status, `min-w-0 flex-1 truncate text-[11.5px] ${tone.copy}`);
     text(status, detectorStatus(next));
-    text(targetBadge, TARGET_LABEL[next.target.state]);
 
-    const idLabel = next.target.id === null ? "--" : String(next.target.id);
-    text(targetId, idLabel);
-    text(targetTitle, `ID ${idLabel}`);
-    // A target whose size has since been cleared is not being followed, and
-    // reporting it as detected here would imply that it is.
+    // A target whose size has since been cleared is not being followed, so the
+    // badge says which of the two it is rather than a sentence saying why.
     const targetSizeCm = next.target.id === null ? null : deps.sizes.get(next.target.id);
-    if (next.target.id !== null && targetSizeCm === null) {
-      text(targetDetail, "크기 미등록 · 목록에서 한 변 길이(cm)를 입력해야 추적할 수 있습니다");
-    } else if (next.target.marker !== null) {
-      const metrics = markerMetrics(next.target.marker);
-      text(
-        targetDetail,
-        `현재 결과에서 감지됨 · H ${next.target.marker.hammingDistance} · (${Math.round(metrics.centerX)}, ${Math.round(metrics.centerY)})`,
-      );
-    } else {
-      text(targetDetail, TARGET_LABEL[next.target.state]);
-    }
+    text(targetBadge, next.target.id !== null && targetSizeCm === null ? "크기 필요" : TARGET_LABEL[next.target.state]);
+    // The only control on this panel, and it is only shown when there is a
+    // lock for it to release.
+    clear.hidden = next.target.id === null;
+    text(targetTitle, next.target.id === null ? "--" : `ID ${next.target.id}`);
 
     text(count, String(next.markers.length));
     reconcileMarkerRows(markerList, markerNote, markerRowNodes, next, deps.sizes);
