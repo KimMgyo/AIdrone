@@ -99,14 +99,19 @@ export function installConsole(
 
       <div data-k="log" class="min-h-0 flex-1 select-text overflow-y-auto px-[15px] py-[9px] font-mono text-[11.5px] leading-[1.85]"></div>
 
-      <form data-k="form" class="flex flex-none items-center gap-[8px] px-[15px] pb-[12px]">
-        <div class="flex h-[34px] min-w-0 flex-1 items-center gap-[8px] rounded-[3px] border border-line3 bg-[#0D1116] px-[11px]">
+      <!-- A container query, not a viewport one: this dock also narrows when
+           the left rail opens, and the viewport knows nothing about that.
+           Below the width where the field would be crushed the shortcuts go
+           and the field keeps the row - they are conveniences for commands
+           you can still type, and a zero-width input is not a console. -->
+      <form data-k="form" class="@container/cmd flex flex-none items-center gap-[8px] px-[15px] pb-[12px]">
+        <div class="flex h-[34px] min-w-[120px] flex-1 items-center gap-[8px] rounded-[3px] border border-line3 bg-[#0D1116] px-[11px]">
           <div class="flex-none font-mono text-[12px] text-accent">&rsaquo;</div>
           <input data-k="input" type="text" autocomplete="off" spellcheck="false"
             placeholder="command / takeoff / rc 0 30 0 0 / battery?"
             class="h-full min-w-0 flex-1 border-none bg-transparent font-mono text-[12px] text-ink disabled:text-dim2" />
         </div>
-        ${quickMarkup}
+        <div class="flex flex-none items-center gap-[8px] @max-[570px]/cmd:hidden">${quickMarkup}</div>
         <button type="submit" data-k="send" class="h-[34px] flex-none rounded-[3px] border border-line4 bg-btn px-[15px] text-[12px] text-ink enabled:cursor-pointer enabled:hover:bg-[#28303A] disabled:opacity-40">send</button>
       </form>
     </div>

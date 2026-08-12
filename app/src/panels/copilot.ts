@@ -52,10 +52,14 @@ const STEP_TONE: Record<AgentStep["state"], { dot: string; text: string }> = {
   cancelled: { dot: "bg-dim3", text: "text-dim2" },
 };
 
+// `flex-none` is load-bearing, not decoration: without it the button is the
+// only shrinkable item in the row, so a narrow rail crushed its padding and
+// then wrapped 전송 onto two lines. The console's send button has carried the
+// same guard since it was written.
 const SEND_IDLE =
-  "h-[38px] rounded-[3px] bg-accent px-[16px] text-[12.5px] font-semibold text-[#08131A] hover:bg-accent2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+  "h-[38px] flex-none rounded-[3px] bg-accent px-[16px] text-[12.5px] font-semibold text-[#08131A] hover:bg-accent2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 const SEND_BUSY =
-  "h-[38px] rounded-[3px] bg-alert px-[16px] text-[12.5px] font-semibold text-[#1A0A0A] hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+  "h-[38px] flex-none rounded-[3px] bg-alert px-[16px] text-[12.5px] font-semibold text-[#1A0A0A] hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
 const ROW = "flex items-baseline gap-[8px] py-[2px]";
 
@@ -103,7 +107,7 @@ export function installCopilot(mount: HTMLElement, deps: CopilotDeps = {}): Copi
         <button type="button" data-k="copilot-mic" aria-label="음성 입력" class="${MIC_OFF}">
           <span aria-hidden="true" class="relative h-[13px] w-[8px] rounded-[4px] bg-current before:absolute before:left-1/2 before:top-[11px] before:h-[5px] before:w-px before:-translate-x-1/2 before:bg-current after:absolute after:left-1/2 after:top-[15px] after:h-px after:w-[12px] after:-translate-x-1/2 after:bg-current"></span>
         </button>
-        <div class="flex h-[38px] flex-1 items-center rounded-[3px] border border-[#232A33] bg-tile px-[12px]">
+        <div class="flex h-[38px] min-w-0 flex-1 items-center rounded-[3px] border border-[#232A33] bg-tile px-[12px]">
           <input data-k="copilot-input" autocomplete="off" placeholder="예: 이륙해서 한 바퀴 돌면서 마커 찾고 있으면 따라가" aria-label="코파일럿 지시" class="h-full min-w-0 flex-1 border-0 bg-transparent text-[12.5px] text-ink outline-none placeholder:text-dim2" />
         </div>
         <button type="button" data-k="copilot-send" class="${SEND_IDLE}">전송</button>

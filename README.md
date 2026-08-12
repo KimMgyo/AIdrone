@@ -1025,6 +1025,38 @@ worse layout. It is safe only because `main.ts` paints both from the same
 over six consecutive samples, they never did. Any copy that cannot make that
 guarantee is a defect, not an exception.
 
+### Two input rows that did not survive a narrow window
+
+The app declares `min-w-[1024px]`, so 1024 is a width it promises to work at.
+It did not, in two places, and both were the same flexbox mistake seen from
+opposite ends.
+
+**The copilot's 전송 button had no `flex-none`.** Its input wrapper had
+`flex-1` but not `min-w-0`, so the wrapper could not shrink below the
+`<input>`'s intrinsic min-content width and refused to give up space. That
+left the button as the only shrinkable item in the row: its 16 px padding was
+crushed to 10, the label wrapped onto two lines, and it still overflowed the
+row's right padding by 10 px. Both halves are needed and both are now there.
+
+**The UDP console's input collapsed to exactly 0 px wide** at 1024 - measured,
+not estimated. Its wrapper was correct (`min-w-0 flex-1`), which is precisely
+why it absorbed the entire shortfall: four quick buttons at 266 px, `send` at
+57, and 40 px of gaps do not fit in a 422 px dock, so the one flexible item
+went to nothing and the console became a chevron with no field.
+
+The fix is a container query rather than a viewport one, because this dock
+also narrows when the left rail opens and the viewport cannot see that. Below
+570 px of container the quick buttons hide and the field keeps the row; they
+are shortcuts for commands that can still be typed, and `land` is on the L key
+regardless. The field also carries a `min-w-[120px]` floor so it can never
+reach zero again. Measured after: 207 px of field with the shortcuts up, 287
+at 1024 with them gone, and the 전송 button a constant 54.3 × 38 throughout.
+
+A whole-document sweep at 1600/1280/1024 finds no element overflowing its
+parent's padding box any more. The only remaining hits are absolutely
+positioned row highlights, which are placed against the padding box by
+definition.
+
 ### Native vision stays off the WebView's pixel path
 
 `render.ts` only decodes and paints. It does not call `getImageData()` or run a
