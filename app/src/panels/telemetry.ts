@@ -11,8 +11,10 @@
  * `tof` and `baro` are documented in cm so they say cm; `vgx/vgy/vgz` have NO
  * documented unit in SDK 2.0, so they carry no unit label at all - printing a
  * guessed cm/s next to a velocity on a flight display is worse than admitting
- * the datagram never said. No arithmetic happens in this file beyond
- * fixed-point formatting.
+ * the datagram never said. TEMP is `temph` alone, not the `templ`-`temph`
+ * range the drone sends: the high end is where a thermal problem appears
+ * first, and the low one is still on the wire for the console to show. No
+ * arithmetic happens in this file beyond fixed-point formatting.
  *
  * An absent field renders `--`, never 0. Firmware revisions omit fields and a
  * half-parsed datagram must not read as "on the ground, stationary". A cell
@@ -134,7 +136,10 @@ export function installTelemetry(mount: HTMLElement): TelemetryPanel {
     update(s) {
       text(vTof, num(s?.tof, 0));
       text(vBaro, num(s?.baro, 0));
-      text(vTemp, tempRange(s?.templ, s?.temph));
+      // The datagram carries two board temperatures, `templ` and `temph`. Only
+      // the high one is printed: it is the one a thermal problem shows up in
+      // first, and a two-ended range in a one-line cell read as a typo.
+      text(vTemp, num(s?.temph, 0));
       // The SDK names these fields vgx/vgy/vgz but documents no unit. Their
       // raw values are real; printing m/s beside them would not be.
       text(vVgx, num(s?.vgx, 0));
@@ -164,14 +169,6 @@ function fin(v: number | null | undefined): number | null {
 function num(v: number | null | undefined, dp: number): string {
   const n = fin(v);
   return n === null ? MISSING : n.toFixed(dp);
-}
-
-/** `templ`/`temph` are the two ends of one board-temperature range, so one
- *  without the other is not a range and there is nothing honest to print. */
-function tempRange(lo: number | undefined, hi: number | undefined): string {
-  const a = fin(lo);
-  const b = fin(hi);
-  return a === null || b === null ? MISSING : `${a.toFixed(0)}-${b.toFixed(0)}`;
 }
 
 /**
