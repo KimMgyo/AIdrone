@@ -279,7 +279,12 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src-tauri/Cargo.toml app/src-tauri/Cargo.lock
-          # [skip ci] is what stops this from triggering itself forever.
+          # The token below is what stops this job from triggering itself
+          # forever. A warning for hand-written commits, not for this line:
+          # GitHub matches that token ANYWHERE in a commit message, subject or
+          # body, so a commit that merely mentions it publishes nothing at all.
+          # f3e5099 did exactly that - it described this mechanism, quoted the
+          # token, and produced zero workflow runs.
           git commit -m "Release $NEXT [skip ci]"
           # Someone may have pushed while the build ran; rebase rather than
           # force, so their commit is never the one that disappears.
