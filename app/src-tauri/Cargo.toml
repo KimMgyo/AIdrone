@@ -1,5 +1,10 @@
 [package]
 name = "app"
+# The only place the app's version lives. `tauri.conf.json` deliberately omits
+# `version` so Tauri falls back to this one, which is also what `CARGO_PKG_VERSION`
+# gives the status bar and the updater's comparison - so the number on screen, the
+# number in the artifact name, and the number the updater compares cannot drift.
+# Bumped by CI on every push to main; see .github/workflows/release.yml.
 version = "0.1.18"
 description = "Tello viewer over the ESP32 USB vendor-bulk link - Rust owns the drone link, WebCodecs owns decode"
 authors = ["you"]

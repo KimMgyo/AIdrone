@@ -17,7 +17,7 @@
  */
 import type { ControlMode } from "../control-mode.ts";
 import type { NodeLink } from "../transport.ts";
-import { must, style, text } from "../ui.ts";
+import { cls, must, style, text } from "../ui.ts";
 
 /**
  * The connection, as the shell needs to show it, has two peers. The node is a
@@ -41,13 +41,21 @@ export type LinkView = {
   detail: string;
 };
 
-/** The newer build, once GitHub has been asked. Offered in the top bar only
- *  while the link is down: the installer replaces this binary underneath a
- *  running process, so it must never be reachable with a drone in the air. */
+/**
+ * The newer build, once GitHub has been asked.
+ *
+ * Offered as soon as one exists, including mid-session, because a release that
+ * lands while the app is open is exactly when an operator wants to know. What
+ * the offer must never do is run an installer under a flying drone, so
+ * `blocked` carries the reason it cannot be pressed right now instead of the
+ * chip vanishing - a control that disappears teaches nothing.
+ */
 export type UpdateView = {
   version: string;
   applying: boolean;
   error: string | null;
+  /** Why it cannot be applied at this moment, or `null` when it can. */
+  blocked: string | null;
 };
 
 /** Every live cell in the shell, in one shape. Panels own their own state; this
@@ -120,6 +128,10 @@ const MISSING = "--";
 
 const CHIP =
   "flex flex-none items-center gap-[7px] h-[26px] px-[10px] bg-chip border border-[#232931] rounded-[3px]";
+/** The update offer's own shape, hoisted because the paint swaps a dimmed
+ *  variant onto it and a class list typed in two places drifts. */
+const UPDATE_CHIP =
+  "flex flex-none items-center gap-[7px] h-[26px] p-[3px] bg-accent/10 border border-accent/40 rounded-[3px] cursor-pointer hover:bg-accent/20 hover:border-accent/60 disabled:cursor-default";
 const TOGGLE =
   "flex-none w-[28px] h-[26px] bg-chip border border-[#232931] rounded-[3px] cursor-pointer flex items-center justify-center hover:bg-[#1C222A] hover:border-line4";
 const HEADER_DOT = "w-[6px] h-[6px] rounded-full";
@@ -204,10 +216,23 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
         <div class="font-mono text-[11px] text-dim2">DRONE</div>
         <div data-k="drone-copy" class="font-mono text-[11px] text-ink2">--</div>
       </div>
-      <div data-k="update" class="${CHIP} border-accent/40 bg-accent/10" hidden>
+      <!-- The whole chip is the control, not just the pill: the version it
+           names is the only reason to press it, so making the label a dead zone
+           beside a 30px target is a hit area smaller than the thing it explains.
+           The pill stays a span - a button inside a button is invalid, and this
+           one was only ever the affordance.
+
+           It is the only chip here with a control inside it, so it is also the
+           only one whose inset is uniform: the neighbours' 10px horizontal
+           padding left the pill 10px from the right edge and 3px from the top
+           and bottom, which reads as a button pushed off-centre. One 3px inset
+           and a full-height pill make the gap the same on all four sides, and
+           nothing inside adds padding of its own - a label indented further than
+           the border above it is the same asymmetry moved one element along. -->
+      <button data-k="update" type="button" class="${UPDATE_CHIP}" hidden>
         <div class="font-mono text-[11px] text-accent">새 버전 <span data-k="update-version">--</span></div>
-        <button data-k="update-apply" type="button" class="h-[19px] rounded-[2px] bg-accent px-[7px] font-mono text-[10px] font-semibold text-[#08131A] cursor-pointer hover:bg-accent2 disabled:opacity-50 disabled:cursor-default">설치</button>
-      </div>
+        <span data-k="update-apply" class="flex h-full items-center rounded-[2px] bg-accent px-[7px] font-mono text-[10px] font-semibold text-[#08131A]">설치</span>
+      </button>
 
       <div class="flex-1 min-w-[8px]"></div>
 
@@ -345,9 +370,9 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     nodeCopy: q("node-copy", HTMLDivElement),
     droneDot: q("drone-dot", HTMLDivElement),
     droneCopy: q("drone-copy", HTMLDivElement),
-    update: q("update", HTMLDivElement),
+    update: q("update", HTMLButtonElement),
     updateVersion: q("update-version", HTMLSpanElement),
-    updateApply: q("update-apply", HTMLButtonElement),
+    updateApply: q("update-apply", HTMLSpanElement),
     hatchState: q("hatch-state", HTMLDivElement),
     hatchDetail: q("hatch-detail", HTMLDivElement),
     rtt: q("rtt", HTMLSpanElement),
@@ -399,7 +424,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
   const ro = new ResizeObserver(() => measure());
   ro.observe(row);
 
-  cell.updateApply.addEventListener("click", deps.onUpdate);
+  cell.update.addEventListener("click", deps.onUpdate);
   q("estop", HTMLButtonElement).addEventListener("click", deps.onEmergency);
   cell.takeoff.addEventListener("click", deps.onTakeoff);
   cell.land.addEventListener("click", deps.onLand);
@@ -480,9 +505,17 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       cell.update.hidden = m.update === null;
       if (m.update !== null) {
         text(cell.updateVersion, m.update.version);
-        cell.updateApply.disabled = m.update.applying;
+        // Blocked is dimmed but still pressable, and that is the point: a
+        // disabled button swallows the click, so the one place that can say
+        // "power the drone down first" never gets to say it. Only an install
+        // already running takes the click away, because pressing it twice would
+        // start a second download.
+        cell.update.disabled = m.update.applying;
+        cls(cell.update, m.update.blocked === null ? UPDATE_CHIP : `${UPDATE_CHIP} opacity-60`);
         text(cell.updateApply, m.update.applying ? "설치 중" : "설치");
-        if (m.update.error !== null) cell.updateApply.title = m.update.error;
+        // Why it cannot be pressed outranks a past error: it is the thing the
+        // operator can act on right now.
+        cell.update.title = m.update.blocked ?? m.update.error ?? "";
       }
 
       text(cell.status, known(m.status));

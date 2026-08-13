@@ -9,8 +9,33 @@ permissions:
   contents: read
 
 jobs:
+  # Every push to main publishes a prerelease, but the updater only offers a
+  # build whose version is strictly higher than the installed one - so a push
+  # that does not move the version ships an artifact nobody can install. This
+  # job decides the number once; the build jobs write it into their own
+  # checkout, and `bump` commits it back only after every one of them passed,
+  # so a failed build does not burn a version.
+  version:
+    name: Next version
+    runs-on: ubuntu-22.04
+    outputs:
+      next: ${{ steps.pick.outputs.next }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' app/src-tauri/Cargo.toml | head -1)
+          if [ -z "$current" ]; then echo "could not read the current version" >&2; exit 1; fi
+          IFS=. read -r major minor patch <<< "$current"
+          next="$major.$minor.$((patch + 1))"
+          echo "$current -> $next"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
   windows:
     name: Windows NSIS installer
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +96,16 @@ jobs:
         working-directory: app
         run: bun install --frozen-lockfile
 
+      # After `bun install`, so a version this run invented can never look like
+      # a lockfile mismatch. Cargo.toml is the only file holding the version:
+      # tauri.conf.json omits it and falls back to this one.
+      - name: Stamp the build version
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^version = ".*"/version = "${{ needs.version.outputs.next }}"/' app/src-tauri/Cargo.toml
+          sed -n '1,10p' app/src-tauri/Cargo.toml
+
       # AIDRONE_COPILOT_KEY is the demo key baked into published builds so the
       # copilot answers on a fresh machine with nothing configured. It is a
       # repository secret, never a literal in this tree: a key committed to a
@@ -97,6 +132,7 @@ jobs:
 
   ubuntu:
     name: Ubuntu ${{ matrix.version }} packages
+    needs: version
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -130,6 +166,15 @@ jobs:
       - name: Install frontend dependencies
         working-directory: app
         run: bun install --frozen-lockfile
+
+      # Same stamp as the Windows job, from the same single output, so all four
+      # artifacts of one run carry one version.
+      - name: Stamp the build version
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^version = ".*"/version = "${{ needs.version.outputs.next }}"/' app/src-tauri/Cargo.toml
+          sed -n '1,10p' app/src-tauri/Cargo.toml
 
       - name: Build release-specific Debian package
         working-directory: app
@@ -201,3 +246,46 @@ jobs:
                 asset_id: asset.id,
               });
             }
+
+  bump:
+    name: Record the published version
+    needs: [version, publish]
+    # Only for pushes to main. A `workflow_dispatch` rebuild of an older commit
+    # must not move main's version to a number that commit never shipped.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Commit the version this run published
+        shell: bash
+        env:
+          NEXT: ${{ needs.version.outputs.next }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^version = \".*\"/version = \"$NEXT\"/" app/src-tauri/Cargo.toml
+          # Cargo.lock records the crate's own version too, so leaving it behind
+          # hands the next developer a dirty lockfile the first build rewrites.
+          awk -v want="$NEXT" '
+            /^name = "app"$/ { pending = 1 }
+            pending && /^version = / { sub(/"[^"]*"/, "\"" want "\""); pending = 0 }
+            { print }
+          ' app/src-tauri/Cargo.lock > Cargo.lock.next
+          mv Cargo.lock.next app/src-tauri/Cargo.lock
+          if git diff --quiet; then echo "already at $NEXT"; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src-tauri/Cargo.toml app/src-tauri/Cargo.lock
+          # [skip ci] is what stops this from triggering itself forever.
+          git commit -m "Release $NEXT [skip ci]"
+          # Someone may have pushed while the build ran; rebase rather than
+          # force, so their commit is never the one that disappears.
+          for attempt in 1 2 3; do
+            git pull --rebase --quiet origin main && git push origin HEAD:main && exit 0
+            echo "push attempt $attempt failed; retrying"
+            sleep 5
+          done
+          exit 1

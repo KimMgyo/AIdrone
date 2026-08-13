@@ -11,13 +11,12 @@ import { cls, mmss, must, style, text } from "./ui.ts";
 
 const MISSING = "--";
 const DOT = "w-[6px] h-[6px] rounded-full";
-const STREAM = "flex-1 min-w-0 font-mono text-[10.5px] text-[#7C848F] truncate";
 /** The top bar's left-hand chips - LIVE, BATTERY, FLIGHT - are one object with
  *  three payloads. Hoisted because three chips that have to read as a single
  *  group will not stay one if their geometry is typed out three times. */
 const CHIP =
   "flex-none flex items-center gap-[7px] h-[24px] px-[9px] bg-bg/75 border border-line3 rounded-[3px]";
-const CHIP_CAPTION = "font-mono text-[9px] tracking-[.14em] text-dim3";
+const CHIP_CAPTION = "font-mono text-[9px] tracking-[.14em] text-ink";
 const CHIP_VALUE = "font-mono text-[10.5px] leading-none whitespace-nowrap";
 const CROSS = "absolute left-1/2 top-1/2 w-[200px] h-[200px] -ml-[100px] -mt-[100px]";
 const HUD =
@@ -67,8 +66,6 @@ export type PersonOverlayData = Readonly<{
 export type StageOverlayModel = Readonly<{
   state: DroneState | null;
   live: boolean;
-  width: number;
-  height: number;
   mode?: ControlMode;
 }>;
 
@@ -114,8 +111,7 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
              while flying, and flying means watching this rectangle. The stage's
              own top bar is still on the picture and still inside the frame the
              eyes are already in; a number in a side panel is a number nobody
-             reads in time. Only the stream text may absorb a squeeze, so the
-             chips stay flex-none and their values never wrap. -->
+             reads in time. -->
         <div data-k="bat-chip" class="${CHIP}" hidden>
           <div class="${CHIP_CAPTION}">BATTERY</div>
           <div data-k="bat" class="${CHIP_VALUE} text-dim">${MISSING}</div>
@@ -124,7 +120,7 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
           <div class="${CHIP_CAPTION}">FLIGHT</div>
           <div data-k="flight" class="${CHIP_VALUE} text-ink2">${MISSING}</div>
         </div>
-        <div data-k="stream" class="${STREAM} hidden">${MISSING}</div>
+
       </div>
       <div class="flex-none flex items-center gap-[8px] h-[24px] px-[10px] bg-bg/75 border border-line3 rounded-[3px]">
         <div data-k="mode-dot" class="${DOT} bg-dim3"></div>
@@ -161,7 +157,6 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
   const batCell = must('[data-k="bat"]', HTMLDivElement, mount);
   const flightChip = must('[data-k="flight-chip"]', HTMLDivElement, mount);
   const flightCell = must('[data-k="flight"]', HTMLDivElement, mount);
-  const stream = must('[data-k="stream"]', HTMLDivElement, mount);
   const modeDot = must('[data-k="mode-dot"]', HTMLDivElement, mount);
   const modeCell = must('[data-k="mode"]', HTMLDivElement, mount);
   const cross = must('[data-k="cross"]', HTMLDivElement, mount);
@@ -311,18 +306,9 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
       selectedMode = m.mode;
 
       cls(dot, m.live ? `${DOT} bg-alert animate-beat-fast` : `${DOT} bg-dim3`);
-      cls(stream, m.live ? STREAM : `${STREAM} hidden`);
       cls(cross, m.live ? CROSS : `${CROSS} hidden`);
       cls(hud, m.live ? HUD : `${HUD} hidden`);
       paintModeTag();
-
-      const width = Math.round(m.width);
-      const height = Math.round(m.height);
-      // Format identity only. The rates this line used to carry - fps and Mb/s -
-      // are the status bar's, and a second copy over the picture is one more
-      // thing that can disagree with it.
-      const sized = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
-      text(stream, sized ? `${width}×${height} · ${aspect(width, height)}` : MISSING);
 
       // Both chips belong to the picture, so they live and die with it: over the
       // connection hatch they would be two dashes floating on a texture.
@@ -481,15 +467,4 @@ function projectedRect(
     width: `${((right - left) * scale / stageWidth) * 100}%`,
     height: `${((bottom - top) * scale / stageHeight) * 100}%`,
   };
-}
-
-function aspect(width: number, height: number): string {
-  let a = width;
-  let b = height;
-  while (b !== 0) {
-    const remainder = a % b;
-    a = b;
-    b = remainder;
-  }
-  return `${width / a}:${height / a}`;
 }

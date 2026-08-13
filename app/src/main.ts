@@ -532,17 +532,54 @@ onVision((event) => {
 
 // --- self-update -----------------------------------------------------------
 
+/** How long an offered build stays offered before GitHub is asked again. A
+ *  release that lands mid-flight is exactly when the operator wants to know, so
+ *  the check is not a launch-time-only thing; one list request a quarter hour
+ *  costs nothing and keeps the chip honest. */
+const UPDATE_POLL_MS = 15 * 60_000;
+
+/**
+ * Why the offer cannot be applied right now, or `null` when it can.
+ *
+ * The installer replaces this binary underneath the running process, and the
+ * process owns the drone link - so the gate is a powered drone, not a flying
+ * one. Judging "in the air" instead was tempting and worse: it would install
+ * over a live session on the promise that the aircraft was sitting still, and
+ * the supervisor reconnects on its own, so the only state that actually holds
+ * still is a drone that is off.
+ *
+ * A session, or an attempt on its way to one, is therefore the whole condition.
+ * With the drone powered down the handshake cannot complete, so the window opens
+ * by itself and the operator is told exactly how to open it.
+ *
+ * `busy` is asked FIRST on purpose. `attempt()` assigns `renderer` before it
+ * awaits the handshake, so a doomed attempt against a drone that is switched off
+ * looks exactly like a live session here - and telling that operator to power
+ * down a drone that is already off is the one message guaranteed not to help.
+ */
+function updateBlocker(): string | null {
+  if (busy) return "연결 작업이 끝난 뒤 다시 눌러 주세요";
+  if (renderer !== null) return "드론 전원을 끈 뒤 다시 눌러 주세요";
+  return null;
+}
+
 /**
  * Replaces this build with the newer one and restarts.
  *
- * The installer replaces the binary underneath a running process, so nothing
- * may be in flight - least of all a drone. With the landing screen gone, that
- * guarantee is no longer a matter of which screen you are on: the offer is
- * only rendered while the link is down (`updateView()`), and this refuses
- * again here so a stale click during a reconnect cannot get through.
+ * Refuses rather than making room for itself: with a drone powered on this says
+ * what to do and stops. Tearing a session down on the operator's behalf, as a
+ * side effect of pressing an update button, is not a thing an app that flies
+ * hardware should do.
  */
 async function applyUpdate(): Promise<void> {
-  if (pendingUpdate === null || updateApplying || phase !== "offline") return;
+  if (pendingUpdate === null || updateApplying) return;
+  const blocked = updateBlocker();
+  if (blocked !== null) {
+    consolePanel.push("info", `update: ${blocked}`);
+    return;
+  }
+  // Set before the first await so the supervisor cannot start an attempt in the
+  // gap - `superviseLink` stands down while this is true.
   updateApplying = true;
   updateError = null;
   consolePanel.push("info", `update: ${pendingUpdate.asset} 내려받는 중 (${Math.round(pendingUpdate.size / 1e6)} MB)`);
@@ -678,11 +715,27 @@ function linkView(): LinkView {
   return { phase, node: nodeLinkState, drone: ready ? droneUp : null, detail };
 }
 
-/** What the top bar renders. Split out because the offer is gated on the link,
- *  not on a screen: an installer must never run with a drone in the air. */
+/**
+ * What the top bar renders. A newer build is offered the moment one is known,
+ * including mid-session, because a release that lands while the app is open is
+ * exactly when the operator wants to see it. Whether it can be pressed is
+ * `updateBlocker()`'s answer, carried alongside instead of expressed by hiding
+ * the chip - a control that disappears teaches nothing.
+ *
+ * Two bugs are fenced off here. It used to require `offline`, but a drone that is
+ * not answering puts the supervisor in a loop - `offline`, `connecting`,
+ * `offline` - once per retry, so the offer blinked at that cadence and could not
+ * be clicked. And hiding it during a session made the chip vanish the instant
+ * the link came up, which reads as the update having gone away.
+ */
 function updateView(): StationModel["update"] {
-  if (pendingUpdate === null || phase !== "offline") return null;
-  return { version: pendingUpdate.version, applying: updateApplying, error: updateError };
+  if (pendingUpdate === null) return null;
+  return {
+    version: pendingUpdate.version,
+    applying: updateApplying,
+    error: updateError,
+    blocked: updateBlocker(),
+  };
 }
 
 /** Tears the session down and leaves the supervisor offline. Safe to call with
@@ -936,8 +989,6 @@ setInterval(() => {
   overlay.update({
     state: fresh,
     live: videoLive,
-    width: stats?.width ?? 0,
-    height: stats?.height ?? 0,
     mode,
   });
 }, SHELL_HZ_MS);
@@ -960,13 +1011,33 @@ void (async () => {
   }
 })();
 
-// A launcher that cannot reach GitHub must still fly a drone, so this failure
-// is a log line and nothing more.
-void (async () => {
+/**
+ * Asks GitHub what exists, at launch and every `UPDATE_POLL_MS` after.
+ *
+ * A launcher that cannot reach GitHub must still fly a drone, so a failure is a
+ * log line and nothing more - and specifically it does NOT retract an offer this
+ * app already made. Only a successful answer moves `pendingUpdate`, because
+ * "GitHub was unreachable for thirty seconds" is not evidence that the build it
+ * named a quarter hour ago has gone away.
+ *
+ * Quiet after the first answer: a poll that found the same version, or none,
+ * says nothing an operator needs, and one line a quarter hour for the rest of a
+ * flight would be noise in the log that matters.
+ */
+async function checkForUpdate(): Promise<void> {
+  if (updateApplying) return;
   try {
-    pendingUpdate = await updateCheck();
-    if (pendingUpdate !== null) consolePanel.push("info", `update: 새 버전 ${pendingUpdate.version} · ${pendingUpdate.asset}`);
+    const found = await updateCheck();
+    const announce = found !== null && found.version !== pendingUpdate?.version;
+    pendingUpdate = found;
+    if (announce) {
+      consolePanel.push("info", `update: 새 버전 ${found.version} · ${found.asset}`);
+      timeline.push("CMD", `새 버전 ${found.version} · 설치 가능`);
+    }
   } catch (err) {
-    consolePanel.push("info", `update: 확인 실패 · ${errText(err)}`);
+    if (pendingUpdate === null) consolePanel.push("info", `update: 확인 실패 · ${errText(err)}`);
   }
-})();
+}
+
+void checkForUpdate();
+setInterval(() => void checkForUpdate(), UPDATE_POLL_MS);
