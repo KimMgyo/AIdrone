@@ -63,7 +63,12 @@ function Get-NonSystemImports {
     $names += [Text.Encoding]::ASCII.GetString($b, $start, $end - $start)
   }
 
-  $system = '^(KERNEL32|USER32|GDI32|ADVAPI32|SHELL32|OLE32|OLEAUT32|WS2_32|CRYPT32|SECUR32|BCRYPT|NCRYPT|NTDLL|SHLWAPI|COMDLG32|COMCTL32|IPHLPAPI|USERENV|POWRPROF|PROPSYS|DWMAPI|UXTHEME|WINMM|VERSION|IMM32|MSIMG32|SETUPAPI|CFGMGR32|RPCRT4|DBGHELP|PSAPI|api-ms-|VCRUNTIME|MSVCP|ucrtbase|WINHTTP|urlmon|wintrust|OLEACC|d3d|dxgi|opengl|WLDAP32|NETAPI32|AUTHZ|SSPICLI|WTSAPI32|CRYPTBASE|windows\.)'
+  # WINUSB is in this list, not in the installer. It looks like a driver DLL
+  # worth shipping - the USB bulk transport imports it through `nusb` - but it
+  # is part of Windows itself and has been since Vista SP1. Redistributing it
+  # would put a frozen copy next to app.exe that shadows the OS one, on a
+  # machine whose kernel-mode WinUSB half was updated without it.
+  $system = '^(KERNEL32|USER32|GDI32|ADVAPI32|SHELL32|OLE32|OLEAUT32|WS2_32|CRYPT32|SECUR32|BCRYPT|NCRYPT|NTDLL|SHLWAPI|COMDLG32|COMCTL32|IPHLPAPI|USERENV|POWRPROF|PROPSYS|DWMAPI|UXTHEME|WINMM|VERSION|IMM32|MSIMG32|SETUPAPI|CFGMGR32|WINUSB|RPCRT4|DBGHELP|PSAPI|api-ms-|VCRUNTIME|MSVCP|ucrtbase|WINHTTP|urlmon|wintrust|OLEACC|d3d|dxgi|opengl|WLDAP32|NETAPI32|AUTHZ|SSPICLI|WTSAPI32|CRYPTBASE|windows\.)'
   return $names | Where-Object { $_ -notmatch $system }
 }
 
