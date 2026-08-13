@@ -27,6 +27,13 @@ struct Stats {
   uint32_t drop_big;  // frames refused: larger than a single ring can hold
   uint32_t stalls;    // pump iterations where USB could not accept the frame
   uint32_t recoveries; // USB link bounces: stall-watchdog forced + manual
+  uint32_t relinks;    // NETWORK_CONNECTION notifications actually sent
+  // Why the last relink() did or did not go out. Its own field because the
+  // interesting outcomes are the refusals: an endpoint the driver never
+  // released tells a completely different story from one the host is not
+  // polling. 0 sent, 1 no endpoint, 2 usb not ready, 3 endpoint busy
+  // (driver holds it), 4 transfer rejected.
+  uint8_t relink_status;
   uint32_t hiwater;   // peak ring occupancy in bytes; reset by snapshot()
   // Frames the HOST sent us. Useful context when reading the console -- it is
   // the only sign of life from the far end -- but NOT a liveness signal a
@@ -77,6 +84,20 @@ bool link_up();
 // The detach is deliberately seconds long -- measured, a 50 ms bounce and even a
 // full ESP.restart() both leave Windows holding the same dead NIC instance.
 void recover();
+
+// Re-assert "network connected" on the notification endpoint.
+//
+// The measured failure this exists for: Windows takes every frame off the bulk
+// endpoint at full rate and discards it, while its adapter reads Disconnected /
+// 0 bps, because the one link-state notification the NDIS miniport needs was
+// lost. TinyUSB sends it once, at alt-setting selection, and never retries.
+// Nothing on the host side recovers from it - not Restart-NetAdapter, not
+// removing the device node, not a reflash, not another USB port.
+//
+// Safe to call at any time and from any task: it is deferred into the TinyUSB
+// task and skipped outright if the driver has the endpoint busy. A host that is
+// already up treats a repeated "connected" as a no-op.
+void relink();
 
 // Copy one Ethernet frame toward the host. Non-blocking. Returns false if the
 // frame was refused outright (oversized); a frame that displaces older queued

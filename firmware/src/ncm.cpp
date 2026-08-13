@@ -26,6 +26,30 @@ namespace {
 // the iMACAddress string descriptor). Our own end must differ, so we flip the
 // low bit of the last octet -- bit 0 of octet 0 is the multicast bit and must
 // stay clear, bit 1 of octet 0 marks the address locally administered.
+//
+// AIDRONE_MAC_GEN exists because Windows keys the NCM adapter INSTANCE to this
+// address, not to the bus location. Measured against one wedged link: the
+// instance path `USB\VID_303A&PID_8AD1&MI_02\6&24609A99&0&0002` and its
+// ifIndex survived a reflash, a `pnputil /remove-device` + rescan, AND being
+// moved to a different physical USB port - because the MAC survived all three.
+// So a stuck adapter instance cannot be escaped from the host at all; the only
+// way to make Windows build a fresh one is to introduce ourselves as a
+// different NIC.
+//
+// A build flag rather than NVS on purpose. derive_macs() runs from a global
+// constructor, before the Arduino core has initialised NVS, and putting flash
+// access on that path to serve a diagnostic would risk the boot for a feature
+// used once. Rotating the MAC means one rebuild:
+//
+//   pio run -t upload  (with) build_flags += -DAIDRONE_MAC_GEN=1
+//
+// The default of 0 is byte-identical to what shipped, so an existing install
+// keeps its adapter and its static 192.168.4.50. A NEW generation is a NEW
+// adapter with no address - re-run desktop/nic-setup.ps1 after rotating.
+#ifndef AIDRONE_MAC_GEN
+#define AIDRONE_MAC_GEN 0
+#endif
+
 uint8_t g_dev_mac[6];
 char g_mac_str[13];              // 12 uppercase hex chars, NCM spec
 const char *g_ncm_desc = "AIdrone NCM";
@@ -38,6 +62,9 @@ void derive_macs() {
 
   tud_network_mac_address[0] = 0x02; // locally administered, unicast
   memcpy(tud_network_mac_address + 1, base + 1, 5);
+  // Octet 4, not 5: octet 5 carries the host-even / device-odd split below, and
+  // octet 0 carries the locally-administered and multicast bits.
+  tud_network_mac_address[4] ^= (uint8_t)AIDRONE_MAC_GEN;
   tud_network_mac_address[5] &= 0xFE; // host side: even
   memcpy(g_dev_mac, tud_network_mac_address, 6);
   g_dev_mac[5] |= 0x01; // device side: odd
@@ -51,6 +78,11 @@ void derive_macs() {
 }
 
 // ---- Descriptor ------------------------------------------------------------
+// Captured here because relink_notify() below has to address the same endpoint
+// and interface the descriptor advertised, and TinyUSB keeps neither reachable.
+uint8_t g_ep_notif = 0;
+uint8_t g_itf_ctrl = 0;
+
 uint16_t ncm_descriptor_cb(uint8_t *dst, uint8_t *itf) {
   // Notification is IN-only; the bulk pair shares one endpoint number.
   const uint8_t ep_notif = tinyusb_get_free_in_endpoint();
@@ -61,6 +93,8 @@ uint16_t ncm_descriptor_cb(uint8_t *dst, uint8_t *itf) {
   if (!ep_data) {
     return 0;
   }
+  g_ep_notif = (uint8_t)(0x80 | ep_notif);
+  g_itf_ctrl = *itf;
 
   const uint8_t desc[] = {TUD_CDC_NCM_DESCRIPTOR(*itf, g_desc_stridx, g_mac_stridx, (uint8_t)(0x80 | ep_notif), 64,
                                                  ep_data, (uint8_t)(0x80 | ep_data), CFG_TUD_NET_ENDPOINT_SIZE,
@@ -214,6 +248,82 @@ constexpr uint32_t kBounceDetachMs = 12000;
 // is the LIVE time between bounces, and a longer detach must not eat into it.
 constexpr uint32_t kBounceCooldownMs = kBounceDetachMs + 30000;
 uint32_t g_last_bounce_ms = 0;
+
+// ---- Link notification ------------------------------------------------------
+// Re-assert "network connected" on the notification endpoint.
+//
+// This exists because of a measurement that overturned the earlier diagnosis.
+// Against a link Windows reported as `Disconnected / MediaConnectionState:
+// Unknown / 0 bps`, the bench was run straight into it:
+//
+//   usb tx=168p 2.00Mb/s  stall=0  drop=0     -- for nine seconds
+//
+// The host was taking EVERY frame off the bulk endpoint at full rate and
+// discarding it. So the datapath is open, the descriptors are right, the driver
+// is bound (usbncm.inf, ProblemCode 0) -- the only thing missing is the NDIS
+// miniport's notion of link state, which arrives exactly once, on this
+// endpoint, when the host selects the data interface's alternate setting. Lose
+// that one 8-byte interrupt transfer and the adapter stays Disconnected forever
+// while bulk traffic flows into a bin. Nothing on the host recovers it: measured
+// against this state, Restart-NetAdapter, Disable/Enable-PnpDevice,
+// pnputil /remove-device, a 3 s and a 12 s USB detach, a reflash and a different
+// physical port all failed.
+//
+// TinyUSB sends it once and never again, and ncm_device.c is precompiled in the
+// Arduino package, so the retry has to live here. usbd_pvt.h is already included
+// for usbd_defer_func(); the endpoint is ours, advertised by our own descriptor.
+//
+// Claim-or-skip is what makes this safe beside netd: if the driver has its own
+// transfer in flight the claim fails and we simply try again next tick.
+//
+// WHAT IT MEASURED, which is worth more than what it fixes. Run against a live
+// wedge it reports `endpoint busy - driver holds it`, every time: netd's own
+// notification transfer was queued at alt-setting selection and **has never
+// completed**. The host is not issuing IN tokens on the notification pipe at
+// all, while pulling bulk NTBs off the same interface at 2.00 Mb/s. So the
+// missing link state is not a lost packet this side could re-send - it is
+// sitting in the endpoint waiting for a host that never collects it, which is
+// also why every device-side cure failed: a bounce, a reflash and a changed MAC
+// all re-queue a notification nobody reads. The remaining suspects are all
+// host-side (usbncm.sys state) or endpoint allocation, and neither is fixable
+// from here by re-sending.
+bool notify_link_up() {
+  const auto verdict = [](uint8_t code) {
+    portENTER_CRITICAL(&g_lock);
+    g_stats.relink_status = code;
+    if (code == 0) {
+      g_stats.relinks++;
+    }
+    portEXIT_CRITICAL(&g_lock);
+    return code == 0;
+  };
+
+  if (!g_ep_notif) {
+    return verdict(1);
+  }
+  if (!tud_ready()) {
+    return verdict(2);
+  }
+  if (!usbd_edpt_claim(0, g_ep_notif)) {
+    return verdict(3);
+  }
+  // CDC NETWORK_CONNECTION: bmRequestType 0xA1 (in | class | interface),
+  // wValue 1 = connected, wIndex = the control interface, no data stage.
+  // Static, because the transfer outlives this call.
+  static tusb_control_request_t note;
+  note.bmRequestType = 0xA1;
+  note.bRequest = CDC_NOTIF_NETWORK_CONNECTION;
+  note.wValue = 1;
+  note.wIndex = g_itf_ctrl;
+  note.wLength = 0;
+  if (!usbd_edpt_xfer(0, g_ep_notif, (uint8_t *)&note, sizeof(note))) {
+    usbd_edpt_release(0, g_ep_notif);
+    return verdict(4);
+  }
+  return verdict(0);
+}
+
+void relink_cb(void *) { notify_link_up(); }
 
 // Runs in the TinyUSB task.
 void recover_link() {
@@ -410,6 +520,8 @@ bool registered() { return g_registered; }
 bool link_up() { return tud_ready(); }
 
 void recover() { usbd_defer_func(recover_cb, nullptr, false); }
+
+void relink() { usbd_defer_func(relink_cb, nullptr, false); }
 
 bool queue(const uint8_t *frame, uint16_t len) {
   if (!len || len > CFG_TUD_NET_MTU) {

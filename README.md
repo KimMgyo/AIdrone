@@ -1145,6 +1145,60 @@ climbing (REFUSES, curable by the bounce) from a host silently discarding
 `platformio.ini` says: reading the native CDC is fine for `i` and `x`, but it is
 the same cable that disappears during the failure.
 
+#### What the wedge actually is, measured
+
+Everything above narrowed it; the bench and a purpose-built probe finished it.
+
+**1. The USB datapath is not broken.** Against an adapter Windows was reporting
+as `Disconnected / MediaConnectionState: Unknown / 0 bps`, the firmware's own
+synthetic bench was pointed straight into it:
+
+```
+[86s] usb tx=159p 1.90Mb/s stall=0 drop=0
+[87s] usb tx=167p 1.99Mb/s stall=0 drop=0
+[88s] usb tx=168p 2.00Mb/s stall=0 drop=0     ... for nine seconds
+```
+
+The host took **every** frame at full rate and threw it away. That is the
+ACCEPTS shape in `ncm.h`, and it rules out the descriptors, the driver binding,
+the bulk endpoints and the cable in one measurement.
+
+**2. What is missing is the link-state notification, and it is stuck on the
+device side waiting for a host that never reads it.** CDC-NCM delivers link
+state as one 8-byte `NETWORK_CONNECTION` interrupt transfer, sent once when the
+host selects the data interface's alternate setting. A new `n` console command
+re-sends it; against the wedge it refuses, every time, with:
+
+```
+[ncm] relink: endpoint busy - driver holds it
+```
+
+`usbd_edpt_claim()` fails because **netd's original notification transfer is
+still outstanding** - queued at alt-set and never completed, because Windows is
+not issuing IN tokens on that pipe at all. It is simultaneously draining bulk
+NTBs off the same interface at 2 Mb/s.
+
+That single fact explains the whole ladder. Every device-side cure - a 3 s
+bounce, a 12 s detach, a reflash, even a changed MAC - just re-queues a
+notification nobody collects, and every host-side cure short of a reboot leaves
+`usbncm.sys`'s per-instance state intact.
+
+**3. The adapter instance cannot be escaped from the host.** Verified: the
+instance path `USB\VID_303A&PID_8AD1&MI_02\6&24609A99&0&0002` and `ifIndex 17`
+survived a reflash, `pnputil /remove-device` + rescan, and being moved to a
+different physical port. `AIDRONE_MAC_GEN=1` did change the NIC's MAC
+(`02-72-A1-D5-46-CC` -> `...47-CC`) and Windows picked the new MAC up **without**
+creating a new instance, because the device node is keyed on the USB serial
+string (`E072A1D546CC`, from the eFuse MAC), not on the NCM MAC.
+
+Untried, and in this order: **reboot Windows** (the only reset of `usbncm.sys`
+left), then a **different USB controller** - every port tried so far resolves to
+`PCIROOT(0)#PCI(1400)#USBROOT(0)`, so an external hub or another machine is what
+actually changes that variable. If it turns out to be endpoint allocation rather
+than host state, the lever is the CDC console: it reserves IN4/IN5 before NCM
+takes notify IN 0x83, and dropping `ARDUINO_USB_CDC_ON_BOOT` would move the
+notification pipe.
+
 #### The node's own status LED
 
 The DevKitC's single WS2812 on GPIO48 now carries the one fact an operator

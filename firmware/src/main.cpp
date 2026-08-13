@@ -124,6 +124,7 @@ void print_help() {
   con.println(F("  w on|off            wifi shuttle USB leg"));
   con.println(F("  r                   reset counters"));
   con.println(F("  i                   info"));
+  con.println(F("  n                   re-send link-up - fixes a host that reads 0 bps"));
   con.println(F("  x                   detach USB 12 s - revives a dead host NIC"));
   con.println(F("  h                   help"));
 }
@@ -223,6 +224,22 @@ void handle_line(char *line) {
       con.flush();
       ncm::recover();
       break;
+    case 'n': {
+      // The cheap cure, and the one to try BEFORE `x`. A wedged Windows adapter
+      // that is still taking bulk frames at full rate (check `usb tx` while a
+      // bench runs) is missing nothing but its link-state notification; this
+      // re-sends it. Costs 8 bytes and no outage, where `x` costs 12 s of
+      // detach and, measured, does not fix this shape at all.
+      ncm::relink();
+      delay(150); // it is deferred into the TinyUSB task; let it land
+      ncm::Stats s;
+      ncm::snapshot(s);
+      static const char *kWhy[] = {"sent", "no notify endpoint", "usb not ready",
+                                   "endpoint busy - driver holds it", "transfer rejected"};
+      const uint8_t code = s.relink_status < 5 ? s.relink_status : 4;
+      con.printf("[ncm] relink: %s (total %lu)\n", kWhy[code], (unsigned long)s.relinks);
+      break;
+    }
     default:
       print_help();
       break;
@@ -290,9 +307,9 @@ void report() {
   // recov prints delta/total: a bounce takes the USB link down, so the very line
   // that reports it is the one most likely to be lost. The running total is what
   // survives, and it is the only way to tell "bounced once" from "bouncing".
-  con.printf(" | usb tx=%lup %s rx=%lu stall=%lu recov=%lu/%lu\n", (unsigned long)tx_pkts,
+  con.printf(" | usb tx=%lup %s rx=%lu stall=%lu recov=%lu/%lu relink=%lu\n", (unsigned long)tx_pkts,
              rate(tx_bytes, dt).c_str(), (unsigned long)rx_pkts, (unsigned long)stalls, (unsigned long)recov,
-             (unsigned long)n.recoveries);
+             (unsigned long)n.recoveries, (unsigned long)n.relinks);
 
   // No dead-datapath watchdog here, and that is a decision, not an omission. The
   // failure it would treat -- the Windows NCM adapter going Disconnected while
