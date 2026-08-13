@@ -31,42 +31,47 @@ const API_BASE: &str = "https://omni.xenv.cc/v1";
 ///
 /// The router labels every model with a `tool_calling` capability, and the
 /// whole copilot is function calls - so a provider that reports `false` is not
-/// a slower option, it is a broken one. These are the free providers that
-/// report `true` AND were measured actually returning calls.
+/// a slower option, it is a broken one. Every id here reports `true` AND was
+/// measured actually returning calls.
 ///
-/// Ordered by **calls per reply, not by model speed**, which is the
-/// counter-intuitive part. Upstream model time is 1-4 s, but the router queues
-/// each request for anywhere from 2.7 s to 25.6 s, so a round trip costs far
-/// more than the thinking inside it. A model that plans the whole task in one
-/// reply is therefore the fast one:
+/// Ordered by **total tokens for one finished task**, which is not the same as
+/// the cheapest-looking model. Measured by walking this app's own loop - real
+/// system prompt, real tool schema, stubbed results - to `done`:
 ///
-/// | model | thinking | calls in one reply | upstream |
-/// |---|---|---|---|
-/// | `oc/big-pickle` | yes | 4 - the entire plan | 3.3 s |
-/// | `oc/deepseek-v4-flash-free` | yes | 2 | 13.4 s |
-/// | `oc/nemotron-3-ultra-free` | no | 1 | 3.5 s |
-/// | `oc/mimo-v2.5-free` | no | 1 | 0.8 s |
+/// | model | turns | prompt | completion | of which reasoning | total |
+/// |---|---|---|---|---|---|
+/// | `agy/gemini-3.6-flash-low` | 3-4 | 7.7-10.4k | 1.2-1.7k | 1.0-1.5k | **9.4-12.6k** |
+/// | `agy/gemini-3.5-flash-extra-low` | 4-6 | 9.6-19.3k | 1.0-2.8k | 0.8-2.5k | 10.7-22.1k |
+/// | `agy/gemini-2.5-flash-lite` | 8 | 16.9k | 0.17k | none | 17.1k |
+/// | `agy/gemini-2.5-flash` | 8 | 17.0k | 0.19k | none | 17.1k |
 ///
-/// `oc/mimo-v2.5-free` has the fastest model by a wide margin and is last of
-/// the working four, because one call per reply turns a four-step task into
-/// four queue waits. Turning thinking off on `big-pickle` via its
-/// `effort_tiers` was tried and is worse than either: at `effort: none` the
-/// tool calls come back as unassemblable fragments, or not at all.
+/// The counter-intuitive part: prompt tokens outweigh completion roughly ten to
+/// one, because a tool loop re-sends the whole transcript every round trip. So a
+/// model that batches the plan into three replies is far cheaper than one that
+/// emits a single call per reply and spends nothing on thinking - the 2.5 tier
+/// burns no reasoning tokens at all and still costs ~50% more per task. Turns
+/// saved beat tokens saved inside a turn, and that also makes the cheapest model
+/// the fastest one (~8 s per task against ~11.5 s).
 ///
-/// `aug/gpt5.6-luna` is last overall because it is the model this app was
-/// originally pointed at: it answers 502 in 0.4 s while its provider is
-/// disconnected, so carrying it costs almost nothing and the chain picks it up
-/// by itself the day that provider is connected.
+/// `agy/…` and `antigravity/…` are the same catalogue behind two provider paths
+/// (Antigravity CLI and Antigravity). Paired runs of the same model differed by
+/// at most one turn in either direction, which is inside the run-to-run spread,
+/// so the second entry is not a worse model - it is the same model reached
+/// another way, which is exactly what a fallback should be.
 ///
-/// Deliberately absent: `oc/hy3-free` and `oc/north-mini-code-free` (report
-/// `true`, returned no calls when asked), and every `*-web` provider, which
-/// the router itself reports as `tool_calling: false`.
+/// The 2.5 tier is kept last as a different family: it is dead consistent (8
+/// turns, 17.1k, three runs within 70 tokens of each other) and it is the one to
+/// pin with `COPILOT_MODEL` if a 3.x tier ever starts batching calls that should
+/// have been checked against an `observe` first.
+///
+/// Deliberately absent: the free `oc/…` providers this chain used to hold. They
+/// are out of quota, and a link that answers 429 is a round trip spent learning
+/// nothing.
 const DEFAULT_MODELS: &[&str] = &[
-    "oc/big-pickle",
-    "oc/deepseek-v4-flash-free",
-    "oc/nemotron-3-ultra-free",
-    "oc/mimo-v2.5-free",
-    "aug/gpt5.6-luna",
+    "agy/gemini-3.6-flash-low",
+    "antigravity/gemini-3.6-flash-low",
+    "agy/gemini-2.5-flash-lite",
+    "antigravity/gemini-2.5-flash-lite",
 ];
 
 /// How often reasoning fragments are forwarded. Fast enough to read as live
@@ -726,6 +731,18 @@ mod tests {
                 "{model} is not a provider-qualified id"
             );
         }
+        // The chain exists to survive one provider path being down, so it must
+        // never collapse onto a single one - which is what quietly happens when
+        // someone tidies the list down to their favourite model.
+        assert!(
+            DEFAULT_MODELS
+                .iter()
+                .filter_map(|model| model.split('/').next())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1,
+            "every default is behind one provider path"
+        );
     }
 
     #[test]
@@ -733,13 +750,16 @@ mod tests {
         // An operator who names a model means that model: falling back past it
         // would fly the drone on something they did not choose.
         assert_eq!(
-            models_from(Some(" oc/big-pickle \n".to_owned()), None),
-            vec!["oc/big-pickle"]
+            models_from(Some(" agy/gemini-3.6-flash-low \n".to_owned()), None),
+            vec!["agy/gemini-3.6-flash-low"]
         );
         // COPILOT_MODEL wins over COPILOT_MODELS, being the more specific one.
         assert_eq!(
-            models_from(Some("oc/big-pickle".to_owned()), Some("a/b,c/d".to_owned())),
-            vec!["oc/big-pickle"]
+            models_from(
+                Some("agy/gemini-3.6-flash-low".to_owned()),
+                Some("a/b,c/d".to_owned())
+            ),
+            vec!["agy/gemini-3.6-flash-low"]
         );
     }
 

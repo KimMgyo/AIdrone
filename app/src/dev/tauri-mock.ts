@@ -371,7 +371,7 @@ const handlers: Record<string, Handler> = {
   // thing in this file that could mislead.
   copilot_turn: (args) => {
     const notice = args.notice;
-    window.setTimeout(() => send(notice, { kind: "model", model: "oc/big-pickle", fellBack: false }), 120);
+    window.setTimeout(() => send(notice, { kind: "model", model: "agy/gemini-3.6-flash-low", fellBack: false }), 120);
     window.setTimeout(() => send(notice, { kind: "thinking", chunk: "요청을 읽는 중" }), 260);
     window.setTimeout(() => send(notice, { kind: "thinking", chunk: "… 상태 확인" }), 700);
     return {

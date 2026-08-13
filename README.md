@@ -514,29 +514,37 @@ The live UI is a ground station, not a floating viewer:
   silently removed `tool_calls`, and the throttle notice arrived as reply prose
   rather than an HTTP status. All of it went away with the model, and the
   transcript is plain OpenAI again.
-- **The default is a chain, not one model**, because a free provider declining
-  to call a tool is routine and looks identical to a hung task. Rust tries each
-  in turn and returns the first reply that actually carries calls, reporting
-  which model answered. `COPILOT_MODEL` pins one and disables the chain,
-  because an operator naming a model means that model.
-- **The chain is ordered by calls-per-reply, not by model speed**, which is the
-  counter-intuitive part and the answer to "can we use something faster":
+- **The default is a chain, not one model**, because a provider declining to
+  call a tool is routine and looks identical to a hung task. Rust tries each in
+  turn and returns the first reply that actually carries calls, reporting which
+  model answered. `COPILOT_MODEL` pins one and disables the chain, because an
+  operator naming a model means that model.
+- **The chain is ordered by total tokens for one finished task**, which is not
+  the cheapest-looking model. Measured by walking this app's own loop - real
+  system prompt, real tool schema, stubbed tool results - through to `done`:
 
-  | model | thinking | calls in one reply | upstream |
-  |---|---|---|---|
-  | `oc/big-pickle` | yes | **4 - the whole plan** | 3.3 s |
-  | `oc/deepseek-v4-flash-free` | yes | 2 | 13.4 s |
-  | `oc/nemotron-3-ultra-free` | no | 1 | 3.5 s |
-  | `oc/mimo-v2.5-free` | no | 1 | **0.8 s** |
+  | model | turns | prompt | completion | of which reasoning | total |
+  |---|---|---|---|---|---|
+  | `agy/gemini-3.6-flash-low` | **3-4** | 7.7-10.4k | 1.2-1.7k | 1.0-1.5k | **9.4-12.6k** |
+  | `agy/gemini-3.5-flash-extra-low` | 4-6 | 9.6-19.3k | 1.0-2.8k | 0.8-2.5k | 10.7-22.1k |
+  | `agy/gemini-2.5-flash-lite` | 8 | 16.9k | 0.17k | none | 17.1k |
+  | `agy/gemini-2.5-flash` | 8 | 17.0k | 0.19k | none | 17.1k |
 
-  Model time is 1-4 s; the router queues each request for **2.7 s to 25.6 s**.
-  A round trip therefore costs several times the thinking inside it, and the
-  model that plans the whole task in one reply wins by a distance - even though
-  it is the slow one per call. `mimo` has the fastest model here and comes last
-  of the four, because one call per reply turns a four-step task into four
-  queue waits. Disabling thinking on `big-pickle` through its `effort_tiers`
-  was tried and is worse than both: at `effort: none` the tool calls arrive as
-  unassemblable fragments, or not at all.
+  Prompt tokens outweigh completion roughly **ten to one**, because a tool loop
+  re-sends the whole transcript every round trip. So the model that batches the
+  plan into three replies is far cheaper than the one that emits a single call
+  per reply and spends nothing on thinking: the 2.5 tier burns **no** reasoning
+  tokens and still costs ~50% more per task. Turns saved beat tokens saved
+  inside a turn - which also makes the cheapest model the fastest (~8 s per
+  task against ~11.5 s), so this replaces the older calls-per-reply table
+  without contradicting it.
+
+  `agy/…` and `antigravity/…` are the same catalogue behind two provider paths
+  (Antigravity CLI and Antigravity). Paired runs of one model differed by at
+  most one turn either way - inside the run-to-run spread - so the second entry
+  is the same model reached another way, which is what a fallback wants. The
+  free `oc/…` providers are gone from the chain: out of quota, and a link that
+  answers 429 is a round trip spent learning nothing.
 - **The reply is shown while it is still being written**, and the earlier note
   here saying that was impossible was wrong. It was measured on a tool-call
   reply, which is short: the model is silent while it thinks and then emits its
