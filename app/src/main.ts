@@ -636,13 +636,25 @@ const WEDGED = /power-cycle the Tello/;
  *  lookup, not a packet, but there is no reason to ask at the shell's 4 Hz. */
 const NODE_POLL_MS = 1_000;
 
-/** The failure, in the terms of the thing an operator has to go and touch. The
- *  node's two down states get two different sentences: that distinction is the
- *  whole reason `node_link` is three-valued. */
+/**
+ * The failure, in the terms of the thing an operator has to go and touch. The
+ * node's two down states get two different sentences: that distinction is the
+ * whole reason `node_link` is three-valued.
+ *
+ * `link-down` names a specific wedge and its measured cure, not a guess. The
+ * firmware's own notes (`firmware/src/main.cpp`, the `x` command) record what
+ * was tried against it: a 50 ms USB bounce, a 3 s bounce, `ESP.restart()`,
+ * `Restart-NetAdapter`, and the last two combined all left Windows at
+ * "Disconnected / 0 bps". Only a long absence of the NCM function cleared it.
+ * Both of those were re-confirmed on this bug: the device reported `usb=up` with
+ * zero stalls the whole time. So the sentence says the short thing does not work
+ * before it says what does - otherwise the operator burns the afternoon on
+ * replug cycles, which is exactly what happened.
+ */
 function diagnose(why: string): string {
   if (nodeLinkState === "absent") return "노드가 연결되어 있지 않습니다 · USB 케이블을 확인하세요";
   if (nodeLinkState === "link-down") {
-    return "노드는 USB에 보이지만 네트워크 링크가 없습니다 · 노드 전원을 다시 넣으세요";
+    return "노드 링크가 끊겼습니다 · 짧은 재연결로는 복구되지 않습니다 · USB를 30초 뽑았다 꽂으세요";
   }
   if (WEDGED.test(why)) return "드론이 응답하지만 영상을 보내지 않습니다 · 드론 전원을 껐다 켜세요";
   return why;

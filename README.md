@@ -1062,6 +1062,37 @@ the genuinely broken adapter above (`link-down`, amber, with the power-cycle
 sentence on the hatch), and `?linkdown=1` / `?nonode=1` in the browser mock for
 the other two rows of that table.
 
+#### What `link-down` actually means, and what clears it
+
+The state has a name in this repo already. `firmware/src/main.cpp`'s `x` command
+carries the measured ladder: a 50 ms USB bounce, `ESP.restart()`,
+`Restart-NetAdapter`, a 3 s bounce, and the last two combined **all** leave
+Windows at "Disconnected / 0 bps"; only a long absence of the NCM function - a
+reflash sits ~12 s in ROM - clears it. Re-confirmed end to end on the report
+above, with the device's own console reachable throughout:
+
+```
+[   360s] usb=up   ap=0 | wifi rx host=0 ... | usb tx=0p 0.00Mb/s rx=0 stall=0 recov=0/0
+```
+
+`usb=up`, zero stalls, 360 s of uptime - **the firmware is healthy and Windows
+still will not bring the adapter up.** `Restart-NetAdapter` via
+`desktop/nic-restart.ps1` and the firmware's own 3 s bounce were both tried here
+and both failed, exactly as those notes predict.
+
+Which is why the hatch sentence leads with the negative: *"짧은 재연결로는
+복구되지 않습니다"*. Telling an operator to power-cycle the node is worse than
+saying nothing - the firmware's data says it does not work, and the instinct to
+keep replugging is what burns the session. Reproducing the long absence is the
+cure, and the cheapest form of it needs no toolchain: hold **BOOT**, tap
+**RESET**, wait, tap **RESET** again - the S3 sits in ROM with no NCM function
+for as long as you leave it there.
+
+Note the console read needs **DTR asserted**. The S3's native CDC transmits
+nothing while DTR is low, so a reader that leaves it low - as
+`desktop/console.ps1` does, correctly, for the CH343 bridge - sees an empty port
+and reads it as a dead device. That cost one wrong diagnosis here.
+
 **A drone that needs a power cycle now says so.** `ensure_stream_flowing` has
 always ended with `no video after three streamon attempts - power-cycle the
 Tello` when `command` is answered and three `streamoff`/`streamon` cycles
