@@ -16,6 +16,7 @@
  * both give their space straight back to the stage through the same measure.
  */
 import type { ControlMode } from "../control-mode.ts";
+import type { NodeLink } from "../transport.ts";
 import { mmss, must, style, text } from "../ui.ts";
 
 /**
@@ -25,12 +26,15 @@ import { mmss, must, style, text } from "../ui.ts";
  * hid the one thing an operator needs to know first: plug the cable in, or
  * power-cycle the drone.
  *
- * `drone` is `null`, never `false`, while the node is down: with no path to
+ * `node` is three-valued rather than a boolean, because "no node" turned out to
+ * be two situations with two remedies - see `NodeLink` in `transport.ts`.
+ *
+ * `drone` is `null`, never `false`, while the node is not ready: with no path to
  * the aircraft, calling it silent would be a claim this app cannot make.
  */
 export type LinkView = {
   phase: "connecting" | "online" | "offline";
-  node: boolean;
+  node: NodeLink;
   drone: boolean | null;
   /** The reason there is no picture - a failure message, or what to do about
    *  it. Empty exactly when there is nothing to explain. */
@@ -134,6 +138,20 @@ const PHASE_COPY: Record<LinkView["phase"], string> = {
   connecting: "연결 중",
   online: "연결됨",
   offline: "오프라인",
+};
+
+/**
+ * The node cell, which has three readings because the link has three states and
+ * two of them used to read the same.
+ *
+ * `링크 없음` is amber, not red: the hardware is there and the operator has
+ * something specific to do about it, which is not the same news as a cable that
+ * is not plugged in.
+ */
+const NODE_COPY: Record<NodeLink, { copy: string; dot: string }> = {
+  ready: { copy: "연결됨", dot: "bg-ok" },
+  "link-down": { copy: "링크 없음", dot: "bg-warn" },
+  absent: { copy: "없음", dot: "bg-alert" },
 };
 
 /** `null` is not a third kind of down - it is "cannot say", which is what the
@@ -473,7 +491,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
 
       // Each chip answers its own question; the hatch keeps the headline about
       // the picture, which is the thing neither chip is about.
-      const node = peerCopy(m.link.node);
+      const node = NODE_COPY[m.link.node];
       text(cell.nodeCopy, node.copy);
       cell.nodeDot.className = `${HEADER_DOT} ${node.dot}`;
       const drone = peerCopy(m.link.drone);

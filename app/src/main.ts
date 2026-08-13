@@ -56,7 +56,7 @@ import {
   connect,
   disconnect,
   endpoints,
-  nodePresent,
+  nodeLink,
   onDroneState,
   onFrame,
   onLink,
@@ -69,6 +69,7 @@ import {
   setVisionMode,
   type DroneState,
   type Endpoints,
+  type NodeLink,
   type Telemetry,
   copilotTurn,
   updateApply,
@@ -635,9 +636,14 @@ const WEDGED = /power-cycle the Tello/;
  *  lookup, not a packet, but there is no reason to ask at the shell's 4 Hz. */
 const NODE_POLL_MS = 1_000;
 
-/** The failure, in the terms of the thing an operator has to go and touch. */
+/** The failure, in the terms of the thing an operator has to go and touch. The
+ *  node's two down states get two different sentences: that distinction is the
+ *  whole reason `node_link` is three-valued. */
 function diagnose(why: string): string {
-  if (!nodeUp) return "노드가 연결되어 있지 않습니다 · USB 케이블을 확인하세요";
+  if (nodeLinkState === "absent") return "노드가 연결되어 있지 않습니다 · USB 케이블을 확인하세요";
+  if (nodeLinkState === "link-down") {
+    return "노드는 USB에 보이지만 네트워크 링크가 없습니다 · 노드 전원을 다시 넣으세요";
+  }
   if (WEDGED.test(why)) return "드론이 응답하지만 영상을 보내지 않습니다 · 드론 전원을 껐다 켜세요";
   return why;
 }
@@ -650,12 +656,13 @@ let retryAt = 0;
  *  state, and the reason this needs no timer of its own. */
 let lastPainted = 0;
 let lastPaintedAt = 0;
-/** The node's adapter, as Rust last reported it. Polled while offline; while
- *  online it is provably true, because the picture is coming through it. */
-let nodeUp = false;
+/** The node's adapter, as Rust last reported it. Polled while there is no
+ *  picture; while online it is provably `ready`, because the picture is coming
+ *  through it. */
+let nodeLinkState: NodeLink = "absent";
 let nodeCheckedAt = 0;
 /** True only when the drone has actually answered this session. Never `false`
- *  while the node is missing - see `LinkView`. */
+ *  while the node is not ready - see `LinkView`. */
 let droneUp = false;
 
 function setPhase(next: LinkView["phase"], why: string): void {
@@ -666,8 +673,9 @@ function setPhase(next: LinkView["phase"], why: string): void {
 /** The two peers as the shell shows them. `online` is proof of both: frames
  *  are painting, and they came through the node from the drone. */
 function linkView(): LinkView {
-  if (phase === "online") return { phase, node: true, drone: true, detail };
-  return { phase, node: nodeUp, drone: nodeUp ? droneUp : null, detail };
+  if (phase === "online") return { phase, node: "ready", drone: true, detail };
+  const ready = nodeLinkState === "ready";
+  return { phase, node: nodeLinkState, drone: ready ? droneUp : null, detail };
 }
 
 /** What the top bar renders. Split out because the offer is gated on the link,
@@ -730,7 +738,7 @@ async function attempt(): Promise<void> {
     failures = 0;
     controlsReady = true;
     linkOk = true;
-    nodeUp = true;
+    nodeLinkState = "ready";
     droneUp = true;
     lastPainted = renderer.stats().painted;
     lastPaintedAt = performance.now();
@@ -752,9 +760,9 @@ async function attempt(): Promise<void> {
       vision.setSessionLive(false);
     }
     // Which of the two failed, asked rather than guessed: the node is an
-    // adapter this host either holds an address on or does not, and only if it
-    // does can "the drone did not answer" mean anything.
-    nodeUp = await nodePresent().catch(() => false);
+    // adapter this host either holds a usable address on or does not, and only
+    // if it does can "the drone did not answer" mean anything.
+    nodeLinkState = await nodeLink().catch<NodeLink>(() => "absent");
     droneUp = false;
     setPhase("offline", diagnose(why));
     consolePanel.push("err", `!  connect: ${why}`);
@@ -765,7 +773,7 @@ async function attempt(): Promise<void> {
     retryAt = performance.now() + wait;
     // Awaited here, inside the `busy` hold, so the supervisor cannot start the
     // next attempt while preflight has the three sockets open.
-    if (failures === PROBE_AFTER_FAILURES && nodeUp) await probeSockets();
+    if (failures === PROBE_AFTER_FAILURES && nodeLinkState === "ready") await probeSockets();
   } finally {
     busy = false;
   }
@@ -823,20 +831,22 @@ function superviseLink(): void {
 }
 
 /** Rate-limited, and never while a session is up: the picture is the proof
- *  then, and the sweep would just be 254 binds nobody reads. */
+ *  then, and the adapter list would just be work nobody reads. */
 function pollNode(): void {
   const now = performance.now();
   if (now - nodeCheckedAt < NODE_POLL_MS) return;
   nodeCheckedAt = now;
-  void nodePresent()
-    .then((up) => {
-      // A node that has just appeared makes the current backoff pointless: it
-      // was counting down against a host with no link at all.
-      if (up && !nodeUp) retryAt = Math.min(retryAt, performance.now());
-      nodeUp = up;
+  void nodeLink()
+    .then((next) => {
+      // A node that has just become usable makes the current backoff pointless:
+      // it was counting down against a host with no link at all. `link-down`
+      // does NOT collapse it - the adapter is there and still cannot carry a
+      // packet, so retrying sooner would only fail sooner.
+      if (next === "ready" && nodeLinkState !== "ready") retryAt = Math.min(retryAt, performance.now());
+      nodeLinkState = next;
     })
     .catch(() => {
-      nodeUp = false;
+      nodeLinkState = "absent";
     });
 }
 

@@ -18,13 +18,14 @@ mod video;
 mod vision;
 
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use serde_json::json;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::path::BaseDirectory;
@@ -466,39 +467,61 @@ fn endpoints() -> serde_json::Value {
     })
 }
 
-/// Whether the node's link exists on this host at all - a different question
-/// from whether the drone answers, and the panel reports the two separately
-/// because the fixes are different: plug the cable in, or power-cycle the drone.
+/// The state of the node's network link on this host - which is a different
+/// question from whether the drone answers, and the panel reports the two
+/// separately because the fixes are different.
 ///
-/// **A connected UDP socket cannot tell them apart.** With no route to
-/// 192.168.4.0/24, `connect()` still succeeds and `send()` still reports every
-/// byte written, because the datagram leaves by the default route and dies out
-/// there - identical, from the socket, to a drone that is not answering.
+/// Three answers, because there are three situations and the remedy differs in
+/// each. Two of them used to be collapsed into one, and that cost a bench
+/// session: a node sitting plugged in was reported as `absent`, which sent the
+/// operator to check a cable that was already in.
 ///
-/// Asking the kernel for the SOURCE address it would use looks like the answer
-/// and is a platform trap. On Linux `connect()` resolves the route and
-/// `local_addr()` reports an address on the node's own /24. **On Windows it
-/// does not**: with the /24 on-link and `192.168.4.50` held, `local_addr()`
-/// still returns the default interface's address, before and after a send.
-/// That shipped as a Windows-only bug where the node read as missing for the
-/// rest of a session the moment one connect failed.
+/// - `"ready"` - an address on the node's `/24` exists and can be bound. This
+///   is the only state in which the node can be talked to.
+/// - `"link-down"` - the address is configured on an adapter but cannot be
+///   used. On Windows a media-disconnected adapter keeps its static address in
+///   `Tentative` state, so it is listed and unbindable at the same time. The
+///   device is present; the link it should be presenting is not up.
+/// - `"absent"` - no adapter carries the node's `/24` at all.
 ///
-/// What both platforms agree on is `bind`: an address no local adapter carries
-/// is `EADDRNOTAVAIL`/`WSAEADDRNOTAVAIL`. So this asks whether the host holds
-/// ANY address on the node's /24, one bind at a time. No configuration to get
-/// wrong - notably not the installer's `192.168.4.50`, which an operator is
-/// free to have set differently - and no platform API. The node is a USB-NCM
-/// device, so its adapter and its address disappear together when it is
-/// unplugged, which is exactly what makes this meaningful for this hardware.
+/// **Every cheaper method was measured and rejected.** A connected UDP socket
+/// cannot see any of this: with no route to `192.168.4.0/24`, `connect()`
+/// succeeds and `send()` reports every byte written, because the datagram
+/// leaves by the default route and dies out there. Asking for the SOURCE
+/// address `connect()` resolved works on Linux and is wrong on Windows, which
+/// returns the default interface's address regardless - that shipped, and read
+/// as a missing node while the hardware was working. `bind` alone is correct
+/// about usability on both platforms but cannot separate the last two states:
+/// an absent adapter and a `Tentative` address both give `AddrNotAvailable`.
 ///
-/// Measured on Windows: 1.6 ms when the address is found, 3.5 ms for a full
-/// 254-address miss. Polled at 1 Hz, that is nothing.
+/// So the adapter list answers "is it configured" and `bind` answers "can it be
+/// used". `if-addrs` was tried first and drops `Tentative` addresses, which is
+/// exactly the case that matters here; `network-interface` reports them.
+///
+/// Costs no packet and no sweep: only addresses actually on the node's `/24`
+/// are bound, so the miss case does no work at all.
 #[tauri::command]
-fn node_present() -> bool {
+fn node_link() -> &'static str {
     let [a, b, c, _] = from_env("AIDRONE_DEVICE_IP", DEVICE_IP).octets();
-    (1..=254u8).any(|host| {
-        UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::new(a, b, c, host), 0)).is_ok()
-    })
+    let Ok(interfaces) = NetworkInterface::show() else {
+        return "absent";
+    };
+    let mut configured = false;
+    for address in interfaces.iter().flat_map(|i| i.addr.iter()) {
+        let IpAddr::V4(v4) = address.ip() else { continue };
+        if v4.octets()[..3] != [a, b, c] {
+            continue;
+        }
+        configured = true;
+        if UdpSocket::bind(SocketAddrV4::new(v4, 0)).is_ok() {
+            return "ready";
+        }
+    }
+    if configured {
+        "link-down"
+    } else {
+        "absent"
+    }
 }
 
 /// The 250 payload codes of the marker dictionary, for the panel's 6x6 drawing
@@ -732,7 +755,7 @@ pub fn run() {
             send_rc,
             set_vision_mode,
             endpoints,
-            node_present,
+            node_link,
             marker_codes,
             preflight,
             copilot::copilot_turn,

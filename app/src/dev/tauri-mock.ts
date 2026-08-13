@@ -312,14 +312,16 @@ const handlers: Record<string, Handler> = {
   ],
 
   // The node is an adapter, so the mock answers the same question Rust does:
-  // does this host hold the link at all. `?nonode=1` takes it away, which is
-  // the state where the drone cell must read `--` rather than claim silence.
-  node_present: () => !flag("nonode"),
+  // what state is the link in. `?nonode=1` takes it away entirely and
+  // `?linkdown=1` is the harder one - present, configured, and unusable - which
+  // is the state that must NOT read as a missing cable. Both leave the drone
+  // cell reading `--` rather than claiming silence.
+  node_link: () => (flag("nonode") ? "absent" : flag("linkdown") ? "link-down" : "ready"),
 
   connect: (args) => {
     // The one failure retrying cannot fix, in the wording `lib.rs` emits.
     if (flag("wedged")) throw new Error("no video after three streamon attempts - power-cycle the Tello");
-    if (flag("nonode")) throw new Error('tello: no reply to "command"');
+    if (flag("nonode") || flag("linkdown")) throw new Error('tello: no reply to "command"');
     stopSession();
     const current: Session = {
       frames: args.frames,

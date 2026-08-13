@@ -678,14 +678,25 @@ export async function endpoints(): Promise<Endpoints> {
 }
 
 /**
- * Whether the node's network link exists on this host - a different question
- * from whether the drone answers, and the only one of the two that can be
- * asked without touching the drone. Costs no packet (Rust resolves a route and
- * reads back the source address), so it is safe to poll and safe beside a live
- * session.
+ * The node's network link, in the three states an operator has three different
+ * answers to. Rust owns the definition - see `node_link` in `lib.rs`.
+ *
+ * - `ready` - an address on the node's `/24` exists and can be bound. The only
+ *   state in which the node can be talked to.
+ * - `link-down` - the address is configured but unusable. The device is
+ *   plugged in; the link it should present is not up. Distinct from `absent`
+ *   because the remedy is, and reporting the two as one sent an operator to
+ *   check a cable that was already in.
+ * - `absent` - no adapter carries the node's `/24`.
  */
-export async function nodePresent(): Promise<boolean> {
-  return await invoke<boolean>("node_present");
+export type NodeLink = "ready" | "link-down" | "absent";
+
+/**
+ * Costs no packet: Rust reads the adapter list and binds only addresses already
+ * on the node's own `/24`. Safe to poll, and safe beside a live session.
+ */
+export async function nodeLink(): Promise<NodeLink> {
+  return await invoke<NodeLink>("node_link");
 }
 
 /** Probes each socket and the drone itself. Takes ~2 s and cannot run while a

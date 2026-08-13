@@ -1004,33 +1004,63 @@ the reading only refreshed on a failed attempt, it stayed wrong until the cable
 was physically pulled and re-inserted. That is the bug the first-hand report
 described exactly: *"드론만 끄고 노드는 안뽑았는데 NODE가 없음이라고 나오네"*.
 
-What both platforms agree on is **`bind`**: an address no local adapter carries
-fails with `EADDRNOTAVAIL`/`WSAEADDRNOTAVAIL`. So `node_present()` asks whether
-this host holds *any* address on the node's `/24`, one bind at a time. No
-configuration to get wrong - notably not the installer's `192.168.4.50`, which
-an operator is free to have set differently - and no platform API. The node is
-a USB-NCM device, so its adapter and its address disappear together when it is
-unplugged, which is what makes the question meaningful for this hardware.
-Measured on Windows: **1.6 ms** when the address is found, **3.5 ms** for a
-full 254-address miss. It is polled at 1 Hz.
+What both platforms agree on is **`bind`**: an address no local adapter can use
+fails with `EADDRNOTAVAIL`/`WSAEADDRNOTAVAIL`. That is a correct test of
+*usability* - and it is still not enough, because it collapses two situations
+that need two different remedies. Reported first-hand one round later:
+*"노드를 뺐다가 다시 연결했는데 아직 NODE 없음이라고 나오네"*.
 
-That gives each cell an honest value, including the one that has none: while
-the node is missing the drone cell reads `--`, not "없음", because with no path
+That one was not the app lying. Read off the live machine while the report was
+being written:
+
+```
+PnP   Espressif Systems AIdrone NCM        Status: OK          # plugged in
+Net   이더넷 4                              Disconnected, 0 bps # no link
+IP    192.168.4.50/24  Manual              AddressState: Tentative
+bind  192.168.4.50                         AddrNotAvailable (10049)
+```
+
+**A media-disconnected Windows adapter keeps its static address in `Tentative`
+state** - configured and unbindable at the same time. So `bind` said no, which
+was true, and the app printed "USB 케이블을 확인하세요" at an operator whose
+cable was already in. The advice was the defect.
+
+`node_link()` therefore answers with three states, because there are three
+situations:
+
+| | address configured | bindable | chip | remedy |
+|---|---|---|---|---|
+| `ready` | yes | yes | 연결됨 (green) | - |
+| `link-down` | yes | **no** | 링크 없음 (**amber**) | node is plugged in; its link is not up - power-cycle the node |
+| `absent` | no | - | 없음 (red) | check the USB cable |
+
+Separating them needs the *configured* half, which std cannot answer, so
+`network-interface` supplies the adapter list. `if-addrs` was tried first and
+**drops `Tentative` addresses** - precisely the case this exists for - which is
+why it is not the dependency. Note what this also removes: the old 254-address
+sweep is gone, because only addresses actually on the node's `/24` are ever
+bound. A miss now does no binding at all. Measured through real IPC: **7.3 ms**.
+
+That gives each cell an honest value, including the one that has none: while the
+node is not `ready` the drone cell reads `--`, not "없음", because with no path
 to the aircraft this app cannot claim it is silent.
 
 **The reading also refreshes whether or not an attempt is in flight.** It used
 to be gated behind `phase === "offline"` *and* `!busy`, so during a connect
 attempt against a dead drone - seconds long - the chip held whatever it last
-said. That gate is what turned a one-off wrong answer into a stuck one, and it
-is the difference between "check the cable" and "power-cycle the drone".
+said. That gate is what turned a one-off wrong answer into a stuck one.
+
+`link-down` deliberately does **not** collapse the retry backoff the way
+`ready` does. The adapter is there and still cannot carry a packet, so retrying
+sooner would only fail sooner.
 
 **Starting the app before attaching the node works.** The supervisor re-checks
 the adapter once a second while there is no picture, and a node that has just
-appeared collapses whatever backoff was running - it was counting down against
-a host with no link at all. Measured in the browser mock, flipping the flag
-live: node absent at 7 s with `노드가 연결되어 있지 않습니다 · USB 케이블을
-확인하세요` on the hatch, and a painted picture **1.6 s** after the node
-appeared, with no interaction.
+become usable collapses whatever backoff was running - it was counting down
+against a host with no link at all. Verified three ways: the real binary against
+the genuinely broken adapter above (`link-down`, amber, with the power-cycle
+sentence on the hatch), and `?linkdown=1` / `?nonode=1` in the browser mock for
+the other two rows of that table.
 
 **A drone that needs a power cycle now says so.** `ensure_stream_flowing` has
 always ended with `no video after three streamon attempts - power-cycle the
