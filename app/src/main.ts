@@ -641,20 +641,24 @@ const NODE_POLL_MS = 1_000;
  * node's two down states get two different sentences: that distinction is the
  * whole reason `node_link` is three-valued.
  *
- * `link-down` names a specific wedge and its measured cure, not a guess. The
- * firmware's own notes (`firmware/src/main.cpp`, the `x` command) record what
- * was tried against it: a 50 ms USB bounce, a 3 s bounce, `ESP.restart()`,
- * `Restart-NetAdapter`, and the last two combined all left Windows at
- * "Disconnected / 0 bps". Only a long absence of the NCM function cleared it.
- * Both of those were re-confirmed on this bug: the device reported `usb=up` with
- * zero stalls the whole time. So the sentence says the short thing does not work
- * before it says what does - otherwise the operator burns the afternoon on
- * replug cycles, which is exactly what happened.
+ * `link-down` names a specific wedge, and the sentence has been rewritten twice
+ * because the remedy kept turning out to be wrong. The full ladder is in the
+ * README ("The escalation ladder, and where it currently stops"); what matters
+ * here is that `Restart-NetAdapter`, a 3 s and a 12 s USB detach, a device
+ * reflash, `Disable`/`Enable-PnpDevice` and `pnputil /remove-device` have ALL
+ * been measured against a live wedge and none of them cleared it, while the
+ * device reported `usb link: up` throughout.
+ *
+ * So this no longer promises a cure. It names the one action that changes the
+ * variable still under suspicion - the Windows adapter instance, which is keyed
+ * to the bus location - and it says plainly that repeating the same reconnect
+ * will not help, because watching an operator do that on a loop is what this
+ * line exists to prevent.
  */
 function diagnose(why: string): string {
   if (nodeLinkState === "absent") return "노드가 연결되어 있지 않습니다 · USB 케이블을 확인하세요";
   if (nodeLinkState === "link-down") {
-    return "노드 링크가 끊겼습니다 · 짧은 재연결로는 복구되지 않습니다 · USB를 30초 뽑았다 꽂으세요";
+    return "노드 링크가 끊겼습니다 · 다른 USB 포트에 꽂아보세요 · 같은 포트 재연결로는 대개 복구되지 않습니다";
   }
   if (WEDGED.test(why)) return "드론이 응답하지만 영상을 보내지 않습니다 · 드론 전원을 껐다 켜세요";
   return why;
