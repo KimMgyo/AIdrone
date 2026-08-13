@@ -102,12 +102,37 @@ if (-not $after) {
   Say 'adapter gone - unplug the node and plug it back in to let PnP enumerate it fresh'
   exit 2
 }
-Say "after  : $($after.Name) idx=$($after.Index) $($after.Status) $($after.Media) $($after.Speed)"
+Say "rebuilt: $($after.Name) idx=$($after.Index) $($after.Status) $($after.Media) $($after.Speed)"
 if ($after.Status -eq 'Up') {
   Restore-Ip $after.Index
   Say 'RECOVERED by instance rebuild'
   exit 0
 }
-Restore-Ip $after.Index
-Say 'STILL DOWN after a full instance rebuild'
+
+# --- rung 3: drop the COMPOSITE PARENT, not just the NCM function -------------
+# Rung 2 removes the MI_02 child, and PnP rebuilds it under the same parent with
+# the same instance path and the same ifIndex - measured. The parent is the node
+# that owns the whole composite (CDC console + NCM), so removing it forces every
+# function driver to be torn down and re-attached, which is the closest thing to
+# a reboot that does not need one.
+$parent = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data
+if (-not $parent) { Say 'no parent to remove'; exit 3 }
+Say "parent : $parent"
+& pnputil /remove-device "$parent" 2>&1 | ForEach-Object { Say "  $_" }
+Start-Sleep -Seconds 3
+& pnputil /scan-devices 2>&1 | ForEach-Object { Say "  $_" }
+Start-Sleep -Seconds 10
+
+$last = Get-State
+if (-not $last) {
+  Say 'adapter gone - unplug the node and plug it back in'
+  exit 2
+}
+Say "parent : $($last.Name) idx=$($last.Index) $($last.Status) $($last.Media) $($last.Speed)"
+Restore-Ip $last.Index
+if ($last.Status -eq 'Up') {
+  Say 'RECOVERED by composite-parent rebuild'
+  exit 0
+}
+Say 'STILL DOWN after removing the composite parent - reboot is the next rung'
 exit 3

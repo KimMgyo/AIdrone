@@ -1191,13 +1191,43 @@ different physical port. `AIDRONE_MAC_GEN=1` did change the NIC's MAC
 creating a new instance, because the device node is keyed on the USB serial
 string (`E072A1D546CC`, from the eFuse MAC), not on the NCM MAC.
 
-Untried, and in this order: **reboot Windows** (the only reset of `usbncm.sys`
-left), then a **different USB controller** - every port tried so far resolves to
-`PCIROOT(0)#PCI(1400)#USBROOT(0)`, so an external hub or another machine is what
-actually changes that variable. If it turns out to be endpoint allocation rather
-than host state, the lever is the CDC console: it reserves IN4/IN5 before NCM
-takes notify IN 0x83, and dropping `ARDUINO_USB_CDC_ON_BOOT` would move the
-notification pipe.
+That left two suspects: `usbncm.sys`'s per-instance state, or endpoint
+allocation. The next section settles it - it is the instance, and it can be
+rebuilt without a reboot. (Had it been endpoint allocation, the lever would have
+been the CDC console: it reserves IN4/IN5 before NCM takes notify IN 0x83, so
+dropping `ARDUINO_USB_CDC_ON_BOOT` would have moved the notification pipe.)
+
+#### The cure: rebuild the composite PARENT, not the function
+
+Found on the next attempt, and it needs no reboot.
+
+`pnputil /remove-device` on the NCM function (`...&MI_02\...`) rebuilds it under
+the same parent, with the same instance path and the same `ifIndex` - which is
+why rung 2 changed nothing. Removing the **composite parent**
+(`USB\VID_303A&PID_8AD1\E072A1D546CC`) tears down every function driver on the
+device and forces PnP to enumerate it as new:
+
+```
+before : 이더넷 4  idx=17  Disconnected  Unknown  0 bps
+child  : 이더넷 4  idx=17  Disconnected  Unknown  0 bps   <- rung 2, no change
+parent : 이더넷 5  idx=80  Up            Connected 12 Mbps <- rung 3
+RECOVERED by composite-parent rebuild
+```
+
+A genuinely new adapter, `192.168.4.50/24` back to `Preferred`, and the app went
+from `link-down` to `ready` on its next 1 Hz poll with no restart. So the wedge
+**is** per-instance host state, as suspected - the earlier tests only ever failed
+to escape the instance, and the MAC experiment proved why: the device node is
+keyed on the USB serial string, so nothing the firmware advertises can force a
+new one.
+
+`desktop/nic-rebuild.ps1` climbs all three rungs in order and stops at the first
+that works, restoring the static address on whichever adapter it ends up with.
+
+**This does not fix the cause.** Windows still stops polling the notification
+pipe, and it will presumably do it again - it happened ~15 s into a live
+streaming session, not at plug time, so replugging is not the trigger. What has
+changed is the cost: one script, about 40 s, no reboot, and the hatch names it.
 
 #### The node's own status LED
 
