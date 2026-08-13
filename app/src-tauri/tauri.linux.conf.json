@@ -20,12 +20,8 @@
           "libsoup-3.0-0",
           "gstreamer1.0-libav"
         ],
-        "recommends": [
-          "network-manager"
-        ],
         "files": {
-          "/usr/lib/aidrone/installer/70-aidrone-ncm.rules": "installer/linux/70-aidrone-ncm.rules",
-          "/usr/lib/aidrone/installer/aidrone.nmconnection": "installer/linux/aidrone.nmconnection"
+          "/usr/lib/aidrone/installer/70-aidrone-usb.rules": "installer/linux/70-aidrone-usb.rules"
         },
         "postInstallScript": "installer/linux/postinst",
         "postRemoveScript": "installer/linux/postrm"

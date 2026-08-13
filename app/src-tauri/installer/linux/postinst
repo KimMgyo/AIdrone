@@ -1,25 +1,12 @@
 #!/bin/sh
-# Makes the AIdrone node plug-and-play after the Debian package is installed.
-#
-# The driver is already in-box: `cdc_ncm` creates a network interface when the
-# board appears. There is no DHCP server on the host side, though, and its
-# kernel name is MAC-derived. The udev rule gives it the stable `aidrone0`
-# name; the NetworkManager profile binds that name to 192.168.4.50/24.
-#
-# These are configuration files, not disposable package payload. A user may
-# deliberately choose a different subnet, so a later package upgrade must not
-# overwrite that decision. The state files record the checksum last deployed by
-# us: an unchanged file receives new packaged defaults; a changed one is left
-# alone. This is the maintainer-script equivalent of Debian conffile behavior.
+# Installs the USB bulk-device permission rule without overwriting a locally
+# customized rule. The checksum state records the version we last staged.
 set -e
 
-RULES_SRC=/usr/lib/aidrone/installer/70-aidrone-ncm.rules
-CONN_SRC=/usr/lib/aidrone/installer/aidrone.nmconnection
-RULES_DST=/etc/udev/rules.d/70-aidrone-ncm.rules
-CONN_DST=/etc/NetworkManager/system-connections/aidrone.nmconnection
+RULES_SRC=/usr/lib/aidrone/installer/70-aidrone-usb.rules
+RULES_DST=/etc/udev/rules.d/70-aidrone-usb.rules
 STATE_DIR=/var/lib/aidrone/installer
-RULES_STATE=$STATE_DIR/70-aidrone-ncm.rules.sha256
-CONN_STATE=$STATE_DIR/aidrone.nmconnection.sha256
+RULES_STATE=$STATE_DIR/70-aidrone-usb.rules.sha256
 
 hash_file() {
   sha256sum "$1" | awk '{print $1}'
@@ -34,45 +21,23 @@ state_matches() {
 }
 
 install_managed() {
-  src=$1
-  dst=$2
-  mode=$3
-  state=$4
-  label=$5
-
-  [ -f "$src" ] || { echo "AIdrone: missing packaged $label: $src" >&2; exit 1; }
-  if [ -e "$dst" ] && ! state_matches "$state" "$dst"; then
-    echo "AIdrone: preserving locally modified $label: $dst" >&2
+  [ -f "$RULES_SRC" ] || { echo "AIdrone: missing packaged USB udev rule: $RULES_SRC" >&2; exit 1; }
+  if [ -e "$RULES_DST" ] && ! state_matches "$RULES_STATE" "$RULES_DST"; then
+    echo "AIdrone: preserving locally modified USB udev rule: $RULES_DST" >&2
     return 1
   fi
 
-  install -D -o root -g root -m "$mode" "$src" "$dst" ||
-    { echo "AIdrone: could not install $label: $dst" >&2; exit 1; }
-  hash_file "$dst" > "$state" ||
-    { echo "AIdrone: could not record $label ownership" >&2; exit 1; }
-  return 0
+  install -D -o root -g root -m 0644 "$RULES_SRC" "$RULES_DST" ||
+    { echo "AIdrone: could not install USB udev rule: $RULES_DST" >&2; exit 1; }
+  hash_file "$RULES_DST" > "$RULES_STATE" ||
+    { echo "AIdrone: could not record USB udev rule ownership" >&2; exit 1; }
 }
 
 case "$1" in
   configure)
     mkdir -p "$STATE_DIR"
-
-    if install_managed "$RULES_SRC" "$RULES_DST" 0644 "$RULES_STATE" 'udev rule'; then
-      # Reload only. Renaming a live link would interrupt a flight; it applies
-      # the next time the board is plugged in.
+    if install_managed; then
       udevadm control --reload-rules 2>/dev/null || true
-    fi
-
-    if [ -d /etc/NetworkManager/system-connections ]; then
-      if install_managed "$CONN_SRC" "$CONN_DST" 0600 "$CONN_STATE" 'NetworkManager profile'; then
-        nmcli connection reload 2>/dev/null || true
-      fi
-    else
-      # NetworkManager is a Recommends rather than a hard dependency: a server
-      # installation must state the manual replacement instead of looking done.
-      echo "AIdrone: NetworkManager가 없어 링크 IP를 자동 설정하지 못했습니다." >&2
-      echo "AIdrone: 노드를 연결한 뒤 아래를 직접 실행하세요:" >&2
-      echo "  sudo ip addr add 192.168.4.50/24 dev aidrone0 && sudo ip link set aidrone0 up" >&2
     fi
     ;;
 esac

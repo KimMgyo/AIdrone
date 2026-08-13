@@ -1,4 +1,4 @@
-# AIdrone - measuring the USB-NCM path before committing to it
+# AIdrone
 
 `tellovoice` sends the Tello's video through **Tello -> Wi-Fi -> ESP32 -> lwIP
 UDP socket -> WebSocket/TCP -> cloud -> browser**. Two things in that chain cap
@@ -6,106 +6,87 @@ what any desktop rewrite can achieve, and neither is fixed by replacing the UI:
 
 - **`CONFIG_LWIP_UDP_RECVMBOX_SIZE` is 6.** The ESP32's own receive mailbox
   holds six datagrams (~8.8 KB). A 720p IDR frame is 20-40 KB. The burst is
-  discarded inside the ESP32 before any transport is involved.
+  discarded inside the ESP32 before any USB transport is involved.
 - **The relay is TCP.** One lost segment head-of-line-blocks every frame behind
   it, and the same socket carries commands.
 
-This repo tests the replacement: the ESP32-S3 becomes a **USB-C Ethernet
-adapter** (CDC-NCM). Tello UDP datagrams cross the cable as Ethernet frames and
-land in a plain UDP socket on the laptop. No cloud, no TCP, no lwIP mailbox on
-the forwarding path.
-
-The bench existed to decide whether a desktop client was justified. The
-measured USB-NCM margin says it is, so `app/` is now the concrete desktop
-control surface; the bench remains the evidence for its transport assumptions.
+AIdrone replaces that desktop-facing leg with a direct USB transport. The
+ESP32-S3 runs the Tello-facing Soft-AP, receives the Tello's UDP datagrams, and
+sends their payloads to the host through a vendor bulk interface. The desktop
+application owns the USB connection; it does not create an IP network or open a
+UDP socket on a USB NIC.
 
 ```mermaid
 graph LR
-  T[Tello / RMTT] -->|Wi-Fi 2.4GHz<br/>soft-AP <deployment Soft-AP SSID>| E[ESP32-S3<br/>L2 shuttle]
-  E -->|USB-C, CDC-NCM<br/>Ethernet frames| L[Laptop NIC<br/>192.168.4.50]
-  L -->|UDP :11111 video<br/>UDP :8889 command| A[Tauri client<br/>Rust UDP + WebView2]
+  T[Tello / RMTT] -->|Wi-Fi 2.4 GHz<br/>Soft-AP| E[ESP32-S3]
+  E -->|USB-C vendor bulk| A[Tauri client<br/>Rust transport + WebView]
 ```
 
-## The three numbers that decide it - measured
+## USB transport
 
-Measured 2026-08-08 on a WEMOS LOLIN S3 Mini into Windows 11 `UsbNcm.sys`,
-1450 B UDP payloads (1492 B Ethernet frames), 12 s per rate. Raw data:
-`desktop/knee.csv`. The 4 and 8 Mb/s rows were reproduced in a separate later
-run (3.89 Mb/s at 0.2 ms; 5.79 Mb/s at 25.5% loss and 65 ms) after a reflash.
+The firmware enumerates one vendor interface:
 
-| requested | delivered | loss | added delay | ring |
-|---|---|---|---|---|
-| 2 Mb/s | 1.94 Mb/s | **0.000%** | 0.7-1.2 ms | idle, hi 1.5k |
-| 4 Mb/s | 3.89 Mb/s | **0.000%** | 0.12-0.30 ms | idle, hi 1.5k |
-| 5 Mb/s | 4.86 Mb/s | **0.000%** | 0.20-0.34 ms | idle, hi 1.5k |
-| 6 Mb/s | **5.79 Mb/s** | 0.000%, then 0.6% | **17 -> 84 ms, climbing** | fills 13k -> 62.7k |
-| 7 Mb/s | 5.79 Mb/s | 14.9% | ~74 ms | pinned full, drop 87/s |
-| 8 Mb/s | 5.79 Mb/s | 25.5% | ~65 ms | pinned full, drop 171/s |
+- **VID/PID:** `303A:8AD2`
+- **Interface:** `0`
+- **Bulk OUT:** `0x01` (host to ESP32)
+- **Bulk IN:** `0x81` (ESP32 to host)
 
-**1. Sustained goodput: 5.79 Mb/s.** Hard ceiling - identical for 6, 7 and 8
-Mb/s requests, at exactly 500 frames/s. That is 48% of Full-Speed's 12 Mb/s
-nominal and ~60% of the 9.7 Mb/s bulk-payload theoretical, the rest going to
-NCM/NTB framing. The ESP32-S3's native USB is Full-Speed only, so this number
-cannot be raised by tuning - only by moving to a High-Speed part.
+Windows selects **WinUSB automatically** using the firmware's Microsoft OS 2.0
+descriptor. No driver download, Zadig step, network adapter, static address, or
+firewall rule is required. On Ubuntu, the release `.deb` installs the udev
+`uaccess` permission rule; no NetworkManager profile or network configuration is
+required.
 
-**2. Loss: zero below the knee, and the two sides agree exactly.** At 7 Mb/s
-the ESP32 reports `q=587/s drop=87/s tx=500p` and the host reports 14.9% loss;
-87/587 = 14.8%. At 8 Mb/s, 171/671 = 25.5% against a measured 25.5%. Every
-packet is accounted for on one side or the other, so `q = tx + drop` holds and
-neither counter is inventing numbers.
+The USB CDC console remains available on the same cable. It is created
+explicitly by the firmware; it is not an NCM function or a substitute for the
+bulk data interface.
 
-**3. Delay variation is the real limit, and it bites *before* loss does.** The
-6 Mb/s row is the important one: zero loss, but latency climbing linearly
-17 -> 84 ms over 11 s. Requesting 210 kb/s more than the link can carry does
-not drop anything at first - it fills the 64 KB ring, and standing queue is
-latency. The delay is exactly the ring: 62.7 KB / (5.79 Mb/s / 8) = **86 ms**,
-against 84-91 ms measured.
+### Record and port mapping
 
-> **The ring is a latency knob, not a safety margin.** 64 KB buys 86 ms of
-> buffering at line rate. For video that is a reasonable jitter absorber; for a
-> control loop it is 86 ms of stale input. Size it for the deadline you need,
-> and treat "delay climbing at constant loss=0" as the saturation alarm -
-> waiting for `loss>0` reports the problem ~11 s late.
+Both directions use this little-endian framing: the ESP32 sends Tello-side UDP
+datagrams on bulk IN, and the host sends Tello command datagrams on bulk OUT.
 
-`drop=` in the firmware's stats line and `loss=` in the receiver's are
-deliberately separate: together they say *which side* lost the packet.
+```text
+BulkRecord {
+  u16 magic       = 0xA1D2,
+  u16 udp_port,
+  u16 payload_len,
+  u8  payload[payload_len],
+}
+```
 
-### Practical operating points
+The host parser uses `payload_len` to delimit records even when USB transfers
+fragment or coalesce them, and uses `udp_port` to retain the Tello protocol's
+meaning:
 
-- **<= 4.86 Mb/s: safe.** Zero loss, sub-millisecond added delay.
-- **~5.8 Mb/s: the cliff.** Deliverable, but any excess becomes queue delay.
-- **Tello 720p H.264 runs 1-5 Mb/s** (`setbitrate 1..5`). At the default it
-  fits with ~3x headroom; at `setbitrate 5` the margin is gone, because the
-  Wi-Fi leg's own overhead lands on top.
+| UDP port | Meaning |
+|---:|---|
+| `8889` | SDK command replies and control |
+| `8890` | Tello state |
+| `11111` | H.264 video |
+| `9999` | Bench traffic |
 
-Every run in the table shows `wifi rx host=0 grp=0` - no drone attached, so
-those numbers characterise the USB cable alone. The **Wi-Fi leg** has since been
-measured with a real Tello; see *Status*.
+For each host command, bulk OUT carries the same record with `udp_port = 8889`
+and a payload of at most 2048 bytes. This framing is a protocol boundary, not
+an IP subnet.
+
+### Retired CDC-NCM measurements
+
+The `desktop/knee.csv` results and the prior 5.79 Mb/s CDC-NCM measurements are
+**retired historical evidence**. They describe the abandoned virtual-NIC design,
+including its NCM/NTB framing and Windows `UsbNcm.sys` behavior; they are not a
+throughput or latency guarantee for the vendor-bulk protocol. In particular, the
+TinyUSB built-in vendor class uses 64-byte FIFOs, so new transport performance
+must be measured directly.
 
 ## Layout
 
-```
-firmware/          PlatformIO, ESP32-S3 (WEMOS LOLIN S3 Mini, N16R8)
-  src/ncm.cpp      CDC-NCM class + drop-oldest ring + transmit pump
-  src/shuttle.cpp  Wi-Fi AP <-> USB layer-2 shuttle with MAC demux
-  src/bench.cpp    synthetic UDP generator (no drone needed)
-  src/main.cpp     console + 1 Hz stats
-app/               Tauri desktop client (Rust sockets + WebView2 UI)
-  src-tauri/       tello.rs (SDK/UDP), video.rs (reassembly + stamp), h264.rs (native decode), vision.rs (bounded marker/YOLO worker), apriltag3.rs (the marker engine), lib.rs
-  src/transport.ts typed Tauri command/event bridge
-  src/render.ts    WebCodecs decode -> canvas
-  src/lib/aruco.ts native-observation state, target selection, and UI listeners
-  src/screens/     the station shell - the only screen
-  src/panels/      mode selector, key map/RC, vision, telemetry, console, copilot, timeline
-  src/ui.ts        typed DOM helpers and clamped numeric input binding
-desktop/ports.ps1     serial ports + network adapters, one snapshot
-desktop/nicstate.ps1  is the NCM adapter Up, and does it hold its IP
-desktop/nic-setup.ps1 one-time static IP + firewall (self-elevating)
-desktop/nic-restart.ps1 bounce the adapter and restore the IP (self-elevating)
-desktop/fake-tello.ts   SDK + H.264 simulator: the app with no drone, no cable
-desktop/console.ps1     read the device's 1 Hz console (COM10 - never COM18)
-desktop/console-cmd.ps1 send it one verb; `i` reports the soft-AP and lease
-desktop/exit-latency.ps1 how long the app takes to exit after the titlebar X
+```text
+firmware/          PlatformIO ESP32-S3 firmware: Soft-AP relay, vendor bulk transport, CDC console
+app/               Tauri desktop client: Rust USB transport, H.264 decode, vision, and WebView UI
+  src-tauri/       Tello protocol, video reassembly, H.264 decode, vision, and application shell
+  src/             typed bridge, renderer, UI, screens, and panels
+desktop/           development helpers, simulator, and CDC-console utilities
 ```
 
 ## Build and flash
@@ -133,35 +114,23 @@ parks the USB-OTG controller that TinyUSB needs; `platformio.ini` unflags it.
 module - the default `qio_qspi` cannot handshake its octal PSRAM and the board
 crash-loops in the bootloader.
 
-After the first flash the device enumerates as a TinyUSB composite (CDC + NCM),
-not as USB-Serial-JTAG. If the upload port stops auto-resetting, hold **BOOT**
-and tap **RESET**.
+After the first flash the device enumerates as a TinyUSB composite with the
+vendor bulk interface and the USB CDC console, not as USB-Serial-JTAG. If the
+upload port stops auto-resetting, hold **BOOT** and tap **RESET**.
 
-## Host NIC setup - done by the installer
+## Host USB setup
 
-The adapter appears as **"AIdrone NCM"** and needs a **static** address: there
-is no DHCP server on the host's side of the link (see *Why no host DHCP*
-below). The driver half is genuinely plug-and-play on both targets - Windows 11
-binds its in-box `usbncm.inf` and Ubuntu its in-box `cdc_ncm`, with nothing to
-download - so the address is the only thing left, and both installers do it.
+Connect the board with a data-capable USB cable and launch AIdrone.
 
-**Windows.** The per-machine NSIS installer requires a UAC approval, adds the
-inbound UDP rules (9999, 11111, Private profile), and registers the scheduled
-task **AIdrone Link**. The task runs
-`installer/windows/aidrone-link.ps1` as SYSTEM at logon and on device arrival.
-It identifies the adapter by `USB\VID_303A&PID_8AD1`, never by a mutable
-`InterfaceAlias` such as `Ethernet 2`. With no node attached it exits 0 without
-touching another NCM adapter; its transcript is
-`%ProgramData%\AIdrone\link.log`.
+- **Windows:** the Microsoft OS 2.0 descriptor binds interface 0 to WinUSB
+  automatically. Do not create a network adapter, configure an address, add
+  firewall rules, or use NCM recovery scripts.
+- **Ubuntu:** install the release-specific `.deb`; it installs the udev
+  `uaccess` rule that grants the logged-in desktop user access to the vendor
+  interface. Do not configure NetworkManager or a USB network interface.
 
-**Ubuntu.** Install the release-specific `.deb` with
-`sudo apt install ./AIdrone_0.1.17_amd64.deb`, then unplug/replug the board. The
-package installs a udev rule that renames the MAC-derived `enx…` interface to
-**`aidrone0`**, then a NetworkManager profile bound to that name assigns
-`192.168.4.50/24` with `never-default=true`. If NetworkManager is absent (it is
-a `Recommends`, not a `Depends`), `postinst` prints the manual `ip addr add`
-command instead. Package defaults update only while these two `/etc` files are
-unmodified; local subnet/rule edits survive upgrades and purge.
+The CDC console is separate from bulk transport and may be opened for firmware
+diagnostics on the same cable.
 
 The video canvas uses WebKitGTK's WebCodecs implementation. Its H.264 decoder
 is a GStreamer plugin discovered at runtime rather than an ELF dependency, so
@@ -210,8 +179,7 @@ install `gstreamer1.0-libav`. `isConfigSupported=true` with a decoder error
 means one was found and the stream broke it, which is the hardware-element
 case above; check whether `GST_PLUGIN_FEATURE_RANK` is being overridden.
 
-Neither assigns a default gateway. One here would route the machine's internet
-traffic down a USB cable to a drone.
+The vendor-bulk transport does not create a network route or default gateway.
 
 ### Linux release format
 
@@ -229,9 +197,8 @@ downloads the artifact for this exact platform, checks the SHA-256 GitHub
 publishes beside it, installs, and restarts.
 
 It is hand-written (`src-tauri/src/update.rs`) rather than
-`tauri-plugin-updater` for one reason: the plugin cannot update a `.deb`, and
-on Ubuntu the `.deb` is the only artifact that can declare
-`gstreamer1.0-libav` and run the USB-NCM maintainer scripts.
+`tauri-plugin-updater` because the plugin cannot update a `.deb`; the `.deb`
+also declares the dynamically loaded `gstreamer1.0-libav` H.264 decoder.
 
 What it will and will not do:
 
@@ -277,30 +244,13 @@ seconds from click to a running 0.1.15. On Windows the same path was verified
 through the checksum with `AIDRONE_UPDATE_DRY_RUN=1` (123 MB, staged, install
 skipped); the UAC step itself is the one thing a person still has to click.
 
-### Doing it by hand
+### Source builds
 
-Only needed when running from a source build rather than an installed package.
-
-```powershell
-Get-NetAdapter | Where-Object InterfaceDescription -Match 'NCM'
-New-NetIPAddress -InterfaceAlias 'Ethernet 2' -IPAddress 192.168.4.50 -PrefixLength 24
-Set-NetConnectionProfile -InterfaceAlias 'Ethernet 2' -NetworkCategory Private
-New-NetFirewallRule -DisplayName 'AIdrone UDP' -Direction Inbound -Protocol UDP `
-  -LocalPort 9999,11111 -Profile Private -Action Allow
-```
-
-Substitute the real `InterfaceAlias` from the first command. The firewall rule
-matters: Windows silently drops inbound UDP on a new adapter by default, which
-looks exactly like a dead link.
-
-```bash
-ip -br link | grep -i enx           # the NCM adapter, e.g. enx0242ab...
-sudo ip addr add 192.168.4.50/24 dev enx0242ab...
-sudo ip link set enx0242ab... up
-```
-
-Verify on either OS with `bun desktop/rx.ts probe` - it broadcasts on the
-subnet once a second and prints anything that answers.
+No manual network setup is needed for a source build. On Windows, the Microsoft
+OS 2.0 descriptor selects WinUSB when the board is connected. On Ubuntu, install
+the packaged udev rule (or use the release `.deb`) so the desktop user can claim
+the device. The application communicates with interface 0 directly; it never
+discovers the board by probing an IP subnet.
 
 ## Working on the UI, in a browser
 
@@ -330,7 +280,7 @@ A layout is judged in its states, not its happy path, so the mock takes flags:
 | `?empty=1` | no video, so the first-paint gate fails and its error is visible |
 | `?silent=8` | the datapath reports silent 8 s in, frames keep coming - the supervisor must not reconnect |
 | `?stall=6` | the frames stop 6 s in with the session still up - the supervisor must notice and dial again |
-| `?nonode=1` | the node's adapter is absent - NODE reads 없음 and DRONE reads `--` |
+| `?nonode=1` | the node is unavailable - NODE reads 없음 and DRONE reads `--` |
 | `?wedged=1` | the drone answers and never streams, the one failure needing hands on the aircraft |
 
 Flags are read at call time rather than snapshotted at import, so
@@ -459,296 +409,60 @@ it at `$INSTDIR\DirectML.dll` and carries the package `LICENSE.txt` plus
 `ThirdPartyNotices.txt` at `$INSTDIR\directml`. It is never taken from a
 developer's ignored `target/` tree.
 
-## Procedure A - the USB link alone
-
-No drone required. This isolates the cable from every Wi-Fi variable.
-
-1. Open the ESP32 console (`pio device monitor`, or any terminal on the CDC
-   port) and detach the Wi-Fi leg so nothing competes:
-
-   ```
-   w off
-   ```
-
-2. Start the receiver:
-
-   ```bash
-   bun desktop/rx.ts bench --for 60 --csv bench-5m.csv
-   ```
-
-3. Start the generator at the Tello's realistic worst case and walk it up:
-
-   ```
-   b 2000        # 2 Mbps
-   b 5000        # 5 Mbps - RMTT's setbitrate ceiling
-   b 8000        # past the point USB Full-Speed can hold
-   ```
-
-Both sides print once a second. The firmware's `usb tx=` is what left the
-ESP32; the receiver's `rx=` is what arrived. Where they diverge is the answer.
-(The firmware's stats line carries an `rx=` of its own - frames the host sent
-*us* - which is a different number; see the stats-line guide.)
-
-## Procedure B - the real Tello
+## Using the drone
 
 1. Power the Tello. It already stores `ap <deployment Soft-AP SSID> <deployment Soft-AP passphrase>` from
-   `tellovoice`, so it joins on its own; `ap=1` appears in the stats line and
-   `i` prints the lease it was given.
-2. Re-attach the shuttle (`w on`) and stop the generator (`s`).
-3. `bun desktop/rx.ts video --ip 192.168.4.2 --csv video.csv` - it sends
-   `command`, then `streamoff` at 0.7 s and `streamon` at 1.4 s (plus
-   `setbitrate` at 2.1 s if `--bitrate` was given), and measures the stream. The
-   `streamoff` is not optional; see *Drone-side findings*.
+   `tellovoice`, so it joins the ESP32-S3 Soft-AP automatically.
+2. Connect the ESP32-S3 with a data-capable USB cable and launch AIdrone. The
+   app claims the WinUSB/usbfs vendor interface directly and starts its normal
+   control and video session.
+3. Use the application to start the stream and fly. Do not configure a host IP
+   address, USB NIC, firewall exception, or network manager for this connection.
 
-The Tello chunks each frame into 1460-byte datagrams and ends it with a short
-one, so `rx.ts` reports true **fps** and **per-frame bytes** without decoding
-anything. `--bitrate N` passes `setbitrate N` (1-5) to sweep the load.
+### Drone-side findings
 
-### Drone-side findings - the counters proved these were not the link
-
-Both were blamed on USB first. Comparing the two sides is what cleared it: the
-device reported a healthy link and the host NIC was `Up 12 Mbps` in each case,
-which leaves the drone.
+These are Tello behaviors, not USB-transport faults.
 
 **A Tello left believing it is streaming answers `ok` to `streamon` and then
 sends nothing.** Measured: 2 s of frames, then 118 dead seconds, while the drone
-answered `battery? 74` and the device showed `wifi rx host=10/s` - status
-broadcasts only - with `stall=0` and `drop=0`. An explicit `streamoff` first
-fixed it immediately: `wifi rx host=126/s`. That is why `rx.ts video` now always
-sends `command` -> `streamoff` -> `streamon` instead of `command` -> `streamon`.
+continued answering SDK queries. An explicit `streamoff` before `streamon`
+fixed it immediately. That is why the app sends `command` -> `streamoff` ->
+`streamon` rather than only `command` -> `streamon`.
 
 **At `battery? 21` the Tello answers `ok` to `streamon` and stops after ~2 s.**
-Swapping to a charged pack (`battery? 74`) restored full streaming. Ask the
-drone before suspecting the link: a stream that dies while both sides' counters
-stay clean is the drone's doing.
+Swapping to a charged pack (`battery? 74`) restored full streaming. Check the
+aircraft before suspecting the USB transport when a stream dies.
 
-A *flat* pack goes one step further: the Tello stays associated - `clients: 1`
-with its lease still held at `192.168.4.2` - while sending nothing at all
-(`wifi rx host=0`, not even the status broadcast) and answering neither
-`command` nor `battery?`. Association is not liveness; `wifi rx host=` is.
+A flat pack can remain associated while sending no video or state and answering
+neither `command` nor `battery?`. Association is not liveness. `temph?` is
+rejected by this unit; `battery?`, `tof?`, `sdk?`, `sn?`, `wifi?`, and `time?`
+answer.
 
-`temph?` is rejected by this unit - `unknown command: temph?`. `battery?`,
-`tof?`, `sdk?`, `sn?`, `wifi?` and `time?` all answer.
+## Retired CDC-NCM bench and failure analysis
 
-## Design notes
+The former USB-link benchmark, its CDC-NCM counters, the `x` USB-bounce command,
+and all `nic-*.ps1` recovery tooling were for the retired virtual-NIC transport.
+They must not be used to operate the vendor-bulk product.
 
-**Why NCM and not ECM or RNDIS.** CDC-NCM is the only network class with an
-in-box driver on *both* targets: Windows 11 ships `UsbNcm.sys` and Linux ships
-`cdc_ncm`. ECM has no in-box Windows driver. RNDIS is being removed from modern
-Linux. The prebuilt Arduino TinyUSB has `CONFIG_TINYUSB_NCM_ENABLED=1` already,
-and ECM/RNDIS compiled out - so NCM is also the only one reachable without
-rebuilding the framework's static libs.
+The relevant historical result is that Windows `UsbNcm.sys` could wedge
+per-device-instance state while the former NCM data path appeared healthy. That
+failure is the reason the product moved to a vendor interface with automatic
+WinUSB binding. The old throughput, latency, NIC status, and recovery results
+are retained only in repository history and are not claims about vendor bulk.
 
-**Endpoint budget.** The Arduino core allows 5 IN endpoints. CDC reserves
-OUT3/IN4/IN5; NCM adds a notification IN plus a bulk pair sharing one endpoint
-number. Four IN endpoints in use. Console and NIC fit on one cable.
+## Firmware console
 
-**Registration runs in a global constructor.** With `ARDUINO_USB_CDC_ON_BOOT=1`
-the core calls `USB.begin()` -> `tinyusb_init()` from `app_main()`, before
-`setup()`. `-DARDUINO_USB_ON_BOOT=0` cannot prevent it, because `USB.h:25`
-redefines that macro unguarded. So `ncm.cpp` registers its interface from a
-static object, the same trick `USBCDC` itself uses: C++ constructors run in
-`do_global_ctors()` before `app_main()` is entered.
-
-**Drop-oldest, not block.** The ring evicts its oldest frame when full. For
-live video a stale frame has negative value, and back-pressure would only
-convert loss into latency that never drains. `hi=` in the stats line is the
-peak fill - if it approaches `NCM_RING_BYTES`, raise the ring rather than
-accept the drops.
-
-**Why the shuttle demultiplexes.** `esp_wifi_internal_reg_rxcb()` supports one
-callback per interface, so registering ours *replaces* esp_netif's. Consuming
-everything would deafen the soft-AP's own DHCP server and the Tello would never
-get a lease. The callback therefore splits on destination MAC: broadcast and
-multicast go to both sides, unicast to the ESP32's AP MAC goes to lwIP, and
-everything else goes straight to the laptop.
-
-**Why no host DHCP.** The reverse direction would need host frames injected
-into lwIP via `esp_netif_receive()`. `CONFIG_LWIP_L2_TO_L3_COPY` is *not* set
-in the Arduino sdkconfig, so that path allocates `PBUF_REF` and keeps
-referencing the caller's buffer - which for us is a TinyUSB buffer recycled the
-instant `tud_network_recv_cb()` returns. A static host IP costs one setup
-command and avoids a use-after-free.
-
-**`tud_network_xmit_cb()` is synchronous.** TinyUSB's NCM driver calls it from
-inside `tud_network_xmit()`, so the staging buffer is free again the moment
-that returns - one staging buffer, no in-flight ownership tracking. The pump
-pops from the ring *before* asking `tud_network_can_xmit(len)`, because asking
-with one length and transmitting a longer frame would overrun the NTB the
-driver just sized.
-
-### Two defects this rig actually caught
-
-Both were found only because the device's counters and the host's were compared
-against each other. Either one alone looked healthy.
-
-**1. Every driver call must land in the TinyUSB task (fixed).** The first build
-called `tud_network_can_xmit()` / `tud_network_xmit()` from a producer task. It
-ran fine to 8 Mb/s, then at 12 Mb/s **wedged permanently**: `tud_network_xmit()`
-never returned true again, the pump spun on a `pending` frame forever, and the
-ring evicted every single frame - `q=1007/s drop=1007/s tx=0p stall=1001/s`,
-for 160+ s, never recovering. Restarting the generator did not clear it.
-
-The cause is `xmit_put_ntb_into_ready_list()`: TinyUSB's NCM driver hands NTBs
-between `tud_network_xmit()` and `tud_network_xmit_cb()` through arrays with no
-lock, on the assumption that both run in the TinyUSB task. Race them from
-another task and an NTB is lost to both sides - unrecoverable from outside the
-driver. The fix routes the whole TX path through `usbd_defer_func()`, so the
-pump executes *inside* the TinyUSB task; the producer only writes the ring. The
-same sweep that killed the old build now runs through 12 Mb/s untouched.
-
-`recover_link()` (disconnect/connect after `kStallRunLimit` failed steps) is the
-backstop, not the fix - a leaked NTB can only be reclaimed by making the host
-re-enumerate.
-
-**2. `link_up()` cannot see a dead host datapath, and the failure has two
-shapes.** The Windows adapter goes **`Disconnected`, LinkSpeed 0, host IPv4
-gone** while the ESP32 keeps printing `usb=up`: `link_up()` is `tud_ready()`,
-"USB is configured", which is strictly weaker than "the NIC is up". Measuring
-the refusal counter split that failure in two, and the split is what decides who
-can fix it.
-
-**REFUSES.** `tud_network_can_xmit()` rejects every frame indefinitely. Measured
-signature: `stall` pinned at ~1128-1130 per second, `usb tx=0p 0.00Mb/s`, the
-ring pinned at high-water `hi=64.0k` shedding `drop=131/0` per second, `wifi rx
-host=131` per second still arriving from the drone, and `usb=up` - `tud_ready()`
-still true - the whole time. This shape the device can both see and cure: the
-stall watchdog bounces USB. Verified live, stalls went from ~1128/s to 0 and TX
-resumed immediately.
-
-**ACCEPTS.** The host takes every frame at full rate and discards it, so the
-device streams into a pipe with no other end. Every device-side counter reads
-healthy - `stall=0`, `drop=0`, `usb tx` climbing normally - so this shape is
-invisible from the device and belongs to the host. NCM exposes no
-datapath-liveness signal, and `tud_network_init_cb()` is an ECM/RNDIS-era
-callback the NCM driver never invokes - verified, a full
-`tud_disconnect()`/`tud_connect()` cycle that the host sees as a replug leaves
-it untouched. A counter built on it would never increment, so there is none.
-
-ACCEPTS has a transient form that is real and self-healing: during a clean 90 s
-video run the host receiver saw zero packets for exactly 6 s (t=42..47) while
-the device console showed `wifi rx host=132` per second arriving and
-`usb tx=132p` per second leaving with `drop=0`, then it resumed at full rate
-with nothing intervening. The persistent form needs a host-side cure, and no
-cheap one is reliable. One episode was cured by `desktop/nic-restart.ps1`
-(`Restart-NetAdapter`, then re-add the static IP): the device had already been
-transmitting cleanly - `stall=0`, TX flowing, ring draining - while Windows
-still reported `Disconnected / 0 bps`, and the restart brought it back to
-`Up 12 Mbps` with `192.168.4.50` restored. A later episode refused exactly that
-treatment. Tried in this order against one wedged adapter, while the device
-reported `usb=up`, `stall=0`, `rx=0`, `recov=0/2` throughout:
-
-| attempt | host adapter after |
-|---|---|
-| `nic-restart.ps1` alone | `Disconnected / 0 bps` |
-| `x` (3 s bounce), waited 12 s | `Disconnected / 0 bps` |
-| `x`, then `nic-restart.ps1` | `Disconnected / 0 bps` |
-| reflash (~12 s held in ROM) | `Up 12 Mbps` within 8 s |
-
-The 3 s detach is an improvement on 50 ms, not a guarantee. The only cure that
-has never failed is a *long* absence, so budget for a reflash or a physical
-unplug when a bounce does not take.
-
-**A device-side host-silence watchdog was built, measured, and removed.** It
-armed on "no host frames arriving while we transmit", which is undecidable on
-this side: with no receiver running the host is legitimately quiet, and Windows
-on its own emits ARP/mDNS bursts that sustain a 3-second streak, so neither
-silence nor traffic distinguishes a dead datapath from an idle one. Measured
-harm: it bounced USB every few seconds, and because the bounce is a 3 s detach
-Windows played a device disconnect/connect chime on every cycle - the operator
-heard it from across the room. It cured nothing. The transient above is the
-second reason it is gone: it would have replaced a hiccup that heals itself in
-~6 s with that hiccup *plus* a forced 3 s outage.
-
-What remains is the stall watchdog - `kStallRunLimit = 1000` consecutive
-refusals in `ncm.cpp` -> `recover_link()` - which only fires on REFUSES. Gating
-*that* on "host frames arrived during the stall run" was added and removed as
-well: it suppressed the cure in the exact case the cure exists for (measured:
-`stall=1128/s`, `tx=0p`, `recov=0/0`, no recovery). All bounces now share one
-cooldown, `kBounceCooldownMs = 30000` - at most one 3 s bounce per 30 s, no
-matter which path asks. That is what makes an audible loop structurally
-impossible rather than merely unlikely.
-
-**`x` is a USB bounce, not a device reset.** It calls `ncm::recover()`:
-`tud_disconnect()`, `vTaskDelay(kBounceDetachMs)`, `tud_connect()`, with
-`kBounceDetachMs = 3000`. The 3 s is measured, not chosen - a 50 ms detach left
-Windows holding the same wedged NIC instance: the device re-enumerated, PnP
-reported the NCM function OK, and the adapter stayed `Disconnected / 0 bps`.
-Verified on a live REFUSES failure, `x` took stalls from ~1128/s to 0 with TX
-resuming - but that is the device's half only, and Windows still needed
-`nic-restart.ps1` for its own. Against a persistent ACCEPTS adapter neither
-step took; see the ladder above.
-
-**Detection lives in the receiver.** Both measuring modes in `desktop/rx.ts`
-send a 1 Hz `AIDR-HB` datagram to `192.168.4.1:9998`. Nothing listens on the far
-side and nothing needs to; the point is that the host is provably transmitting,
-which is what gives the device's `rx=` counter a meaning to whoever is reading
-the console. After a stream that *was* arriving goes fully silent for
-`SILENT_VERDICT_S = 10` seconds, `rx.ts` prints a verdict naming the check and
-both cures: `nicstate.ps1` to confirm `Status=Disconnected / 0 bps`, then `x` on
-the ESP32 console or `nic-restart.ps1`. The threshold is 10 s and not 3 s
-precisely because the self-healing transient is 6 s, and there is now exactly
-one implementation of it, in `startHeartbeat()`.
-
-What does *not* trigger either shape: 32 s of deliberate oversubscription at
-8 Mb/s, ring pinned full, 25% loss - the link stayed `Up` throughout. Across
-three occurrences the correlate was CDC port open/close churn (attaching and
-detaching the serial monitor on the same composite device), not traffic. That is
-[INFERENCE] from three samples, not a proven mechanism.
-
-## Console
-
-```
-b [kbps] [payload]   start the bench (default 2000 kbps, 1450 B payload)
-s                    stop the bench
-w on|off             attach/detach the Wi-Fi shuttle's USB leg
-r                    reset counters
-i                    info
-x                    bounce USB 3 s - revives a dead host NIC
-h                    help
-```
-
-Stats line, one per second (it wraps in a narrow terminal):
-
-```
-[    12s] usb=up   ap=1 | wifi rx host=418 grp=2 self=0 tx=6 err=0 | ring q=418 hi=4.4k drop=0/0 | usb tx=418p 4.99Mb/s rx=1 stall=0 recov=0/0
-```
-
-`drop=A/B` is A ring evictions (too slow) and B oversize rejects. `stall=`
-counts times `tud_network_can_xmit()` refused the frame. `rx=` is Ethernet
-frames the **host** sent us: the only sign of life from the far end, and context
-for a human rather than something a watchdog can act on (defect 2) - `rx.ts`'s
-1 Hz heartbeat is what makes it readable. `recov=D/T` is D link bounces in this
-second and T since boot; the running total exists because a bounce takes the USB
-link down, so the very line that reports it is the one most likely to be lost -
-during debugging a 96 s hole in the console hid whether the device had bounced
-once or was bouncing in a loop.
-
-Read them in this order:
-
-- **`hi=` climbing toward `NCM_RING_BYTES` with `drop=0`** is the saturation
-  alarm. It fires ~11 s before any loss appears, and what it is really
-  reporting is *latency* - a full 64 KB ring is 86 ms of standing queue.
-- **`drop=` non-zero** means the ESP32 could not keep up: the link is already
-  saturated and the ring is now shedding.
-- **`stall=` non-zero per second is not a defect.** Healthy Tello video runs
-  ~250-280/s: every frame succeeds after a few refusals, so the *consecutive* run
-  never approaches `kStallRunLimit`. The fault is a sustained run with
-  `usb tx=0p` - ~1130/s with nothing leaving is the REFUSES shape, and the
-  watchdog bounces on it.
-- **Everything healthy but the host receives nothing** is the ACCEPTS shape;
-  `rx.ts` says so after 10 s. Confirm with `desktop/nicstate.ps1`
-  (`Disconnected / 0 bps`), then `x` for the device's half and
-  `desktop/nic-restart.ps1` for Windows's. See defect 2 above.
+The USB CDC console remains useful for firmware diagnostics and shares the USB
+cable with the vendor interface. Its output concerns the Soft-AP and Tello
+state; it is not a network adapter status display. Use the firmware console's
+help for the commands implemented by the flashed firmware.
 
 ## Desktop app - the receive-to-paint budget
 
-`app/` is the Tauri client this bench justified. Rust owns the UDP sockets and
-stamps every reassembled frame with the wall clock at its last datagram - 8
-bytes of little-endian microseconds prefixed to the Annex-B payload, shipped
-with the pixels rather than in a side channel that could drift out of step with
-them. The WebView decodes with WebCodecs and paints to a canvas, then subtracts
-the stamp from its own clock.
+`app/` is the Tauri client. Rust owns the vendor-bulk transport and device
+state, reassembles the Tello video stream, and stamps every reassembled frame
+with the wall clock at its last datagram. The WebView decodes with WebCodecs and
+paints to a canvas, then subtracts the stamp from its own clock.
 
 The live UI is a ground station, not a floating viewer:
 
@@ -759,7 +473,7 @@ The live UI is a ground station, not a floating viewer:
   exclusive left-rail mode selector exposes manual keyboard control, native
   person tracking, and a native detector-only ArUco surface; telemetry remains
   below. The right rail holds the LLM copilot and an action
-  timeline; the stage owns the UDP command console and video overlay.
+  timeline; the stage owns the command console and video overlay.
   Its measurement preserves the decoded video aspect ratio rather than
   stretching the drone image.
 - **The flight keys are live in every mode, not just the manual one.** Level
@@ -903,10 +617,11 @@ The live UI is a ground station, not a floating viewer:
   Rotating it is one command plus one build: set the secret again, push (or
   `gh workflow run release.yml`), and the old key is only in old artifacts.
 
-Every real command and RC update goes through the same Rust SDK socket. Ending
-a session neutralizes the sticks first, disables the console and manual panel,
-stops the detector/renderer, and drops the shell to its offline state - from
-which the supervisor immediately begins dialling again.
+Every real command and RC update uses the same Rust Tello-protocol path over
+the vendor-bulk transport. Ending a session neutralizes the sticks first,
+disables the console and manual panel, stops the detector/renderer, and drops
+the shell to its offline state - from which the supervisor immediately begins
+dialling again.
 
 Measured 2026-08-08, same machine, 960x720:
 
@@ -941,316 +656,49 @@ every launch ended with the operator pressing the same button until a picture
 appeared. `main.ts` supervises the link instead - it dials on boot, retries
 with backoff from 1.5 s to a ceiling of 8 s, and never gives up.
 
-The verdict is deliberately **not** the handshake resolving, and not UDP
-arriving. Both can be true while the operator stares at a black canvas, which
-is the failure this app has hit most often (a WebView with no H.264 decoder,
-an SPS the decoder cannot hold, a DPB that swallowed twelve frames). `online`
-means `stats.painted` is advancing; two seconds of it not advancing is
+The verdict is deliberately **not** the bulk transport opening, and not a video
+record arriving. Both can be true while the operator stares at a black canvas,
+which is the failure this app has hit most often (a WebView with no H.264
+decoder, an SPS the decoder cannot hold, a DPB that swallowed twelve frames).
+`online` means `stats.painted` is advancing; two seconds of it not advancing is
 `offline`, and the supervisor tears the session down and dials again.
 
 That split had to be enforced in one more place than it looks. `link.rs` emits
 its own silence event, and the shell used to derive the picture from it:
-`videoLive = linkOk && painted > 0`. The first time the wire went quiet while
-frames were still painting, the hatch dropped over a live 30 fps canvas. The
-silence report is a symptom the status bar prints in its `LINK` cell; the
-supervisor's phase is the verdict, and `?silent=8` in the browser mock is the
-regression that keeps the two apart.
+`videoLive = linkOk && painted > 0`. The first time the transport went quiet
+while frames were still painting, the hatch dropped over a live 30 fps canvas.
+The silence report is a symptom the status bar prints in its `LINK` cell; the
+supervisor's phase is the verdict.
 
 Tearing down is the same path a failure takes, in the same order safety needs:
 autonomy stopped, sticks neutralised, console and manual panel disabled, then
-the sockets. Three failures in a row is no longer a slow drone, so the socket
-preflight runs itself and prints all three results to the console - awaited
-inside the attempt's own `busy` hold, because `preflight` binds the same three
-ports and would otherwise report AddrInUse against a session it raced.
+the USB session. Reconnection retries do not require port binding or host
+network configuration.
 
-### Two connections, not one - and the socket cannot tell them apart
+### Node and drone state
 
-There is a node and there is a drone. The node is a USB network adapter; the
-drone is a radio peer behind it. They fail separately, the fixes are different
-(plug the cable in / power-cycle the aircraft), and one combined "연결됨" hid
-which one to go and touch. The top bar carries a chip each.
+There is a node and there is a drone. The node is the USB vendor-bulk peripheral;
+the drone is the radio peer behind its Soft-AP. They fail separately, so the
+application presents their state separately rather than collapsing them into one
+"connected" claim.
 
-Telling them apart is harder than it looks, and the obvious method does not
-work. Measured with a scratch program against a host holding no route to
-`192.168.4.0/24`:
+If the node is unavailable, check the data-capable cable and connection. On
+Ubuntu, confirm the packaged udev `uaccess` rule is installed and that another
+application is not already claiming the device. On Windows, interface 0 should
+bind to WinUSB automatically through the Microsoft OS 2.0 descriptor. None of
+these checks involve an IP address, a network adapter, or NCM recovery tooling.
 
-```
-attempt 1 (no route)   connect=ok  send=7B  no reply (timeout)
-attempt 3 (peer up)    connect=ok  send=7B  reply="ok"
-```
+If the node is available but the drone has no state or video, check the Tello's
+power, association, and stream state. The normal app teardown path neutralizes
+flight controls before it retries, so transport recovery does not leave a
+standing RC command active.
 
-`connect()` succeeds and `send()` reports all seven bytes written **with no
-node attached at all**, because the datagram leaves by the default route and
-dies out there. From the socket, a missing node and a silent drone are the
-same event. The same run also cleared two suspects for the reconnect
-complaints: attempts alternated freely between unreachable and reachable, so a
-failed attempt never leaves a port bound and never poisons the next one.
+### Retired Windows NCM wedge
 
-The next idea is asking the kernel which **source address** it would use, since
-`connect` on UDP puts nothing on the wire and `local_addr()` then reports the
-interface it picked. **That shipped and it was wrong on Windows.** Verified
-with a scratch `rustc` build of the exact function body, on a host holding
-`192.168.4.50` with `192.168.4.0/24` on-link:
-
-```
-node 192.168.4.1:  local = 192.168.10.20  -> present = false   # WRONG
-source chosen per destination: 192.168.4.1 -> 192.168.10.20
-```
-
-Linux resolves the route and hands back an address on the node's `/24`; Windows
-returns the default interface's address regardless, before and after a send.
-So the node read as missing while it was plugged in and working - and because
-the reading only refreshed on a failed attempt, it stayed wrong until the cable
-was physically pulled and re-inserted. That is the bug the first-hand report
-described exactly: *"드론만 끄고 노드는 안뽑았는데 NODE가 없음이라고 나오네"*.
-
-What both platforms agree on is **`bind`**: an address no local adapter can use
-fails with `EADDRNOTAVAIL`/`WSAEADDRNOTAVAIL`. That is a correct test of
-*usability* - and it is still not enough, because it collapses two situations
-that need two different remedies. Reported first-hand one round later:
-*"노드를 뺐다가 다시 연결했는데 아직 NODE 없음이라고 나오네"*.
-
-That one was not the app lying. Read off the live machine while the report was
-being written:
-
-```
-PnP   Espressif Systems AIdrone NCM        Status: OK          # plugged in
-Net   이더넷 4                              Disconnected, 0 bps # no link
-IP    192.168.4.50/24  Manual              AddressState: Tentative
-bind  192.168.4.50                         AddrNotAvailable (10049)
-```
-
-**A media-disconnected Windows adapter keeps its static address in `Tentative`
-state** - configured and unbindable at the same time. So `bind` said no, which
-was true, and the app printed "USB 케이블을 확인하세요" at an operator whose
-cable was already in. The advice was the defect.
-
-`node_link()` therefore answers with three states, because there are three
-situations:
-
-| | address configured | bindable | chip | remedy |
-|---|---|---|---|---|
-| `ready` | yes | yes | 연결됨 (green) | - |
-| `link-down` | yes | **no** | 링크 없음 (**amber**) | node is plugged in; its link is not up - power-cycle the node |
-| `absent` | no | - | 없음 (red) | check the USB cable |
-
-Separating them needs the *configured* half, which std cannot answer, so
-`network-interface` supplies the adapter list. `if-addrs` was tried first and
-**drops `Tentative` addresses** - precisely the case this exists for - which is
-why it is not the dependency. Note what this also removes: the old 254-address
-sweep is gone, because only addresses actually on the node's `/24` are ever
-bound. A miss now does no binding at all. Measured through real IPC: **7.3 ms**.
-
-That gives each cell an honest value, including the one that has none: while the
-node is not `ready` the drone cell reads `--`, not "없음", because with no path
-to the aircraft this app cannot claim it is silent.
-
-**The reading also refreshes whether or not an attempt is in flight.** It used
-to be gated behind `phase === "offline"` *and* `!busy`, so during a connect
-attempt against a dead drone - seconds long - the chip held whatever it last
-said. That gate is what turned a one-off wrong answer into a stuck one.
-
-`link-down` deliberately does **not** collapse the retry backoff the way
-`ready` does. The adapter is there and still cannot carry a packet, so retrying
-sooner would only fail sooner.
-
-**Starting the app before attaching the node works.** The supervisor re-checks
-the adapter once a second while there is no picture, and a node that has just
-become usable collapses whatever backoff was running - it was counting down
-against a host with no link at all. Verified three ways: the real binary against
-the genuinely broken adapter above (`link-down`, amber, with the power-cycle
-sentence on the hatch), and `?linkdown=1` / `?nonode=1` in the browser mock for
-the other two rows of that table.
-
-#### What `link-down` actually means, and what clears it
-
-The state has a name in this repo already. `firmware/src/main.cpp`'s `x` command
-carries the measured ladder: a 50 ms USB bounce, `ESP.restart()`,
-`Restart-NetAdapter`, a 3 s bounce, and the last two combined **all** leave
-Windows at "Disconnected / 0 bps"; only a long absence of the NCM function - a
-reflash sits ~12 s in ROM - clears it. Re-confirmed end to end on the report
-above, with the device's own console reachable throughout:
-
-```
-[   360s] usb=up   ap=0 | wifi rx host=0 ... | usb tx=0p 0.00Mb/s rx=0 stall=0 recov=0/0
-```
-
-`usb=up`, zero stalls, 360 s of uptime - **the firmware is healthy and Windows
-still will not bring the adapter up.** `Restart-NetAdapter` via
-`desktop/nic-restart.ps1` and the firmware's own 3 s bounce were both tried here
-and both failed, exactly as those notes predict.
-
-Which is why the hatch sentence leads with the negative: *"짧은 재연결로는
-복구되지 않습니다"*. Telling an operator to power-cycle the node is worse than
-saying nothing - the firmware's data says it does not work, and the instinct to
-keep replugging is what burns the session. Reproducing the long absence is the
-cure, and the cheapest form of it needs no toolchain: hold **BOOT**, tap
-**RESET**, wait, tap **RESET** again - the S3 sits in ROM with no NCM function
-for as long as you leave it there.
-
-Note the console read needs **DTR asserted**. The S3's native CDC transmits
-nothing while DTR is low, so a reader that leaves it low - as
-`desktop/console.ps1` does, correctly, for the CH343 bridge - sees an empty port
-and reads it as a dead device. That cost one wrong diagnosis here.
-
-#### The escalation ladder, and where it currently stops
-
-A later session drove this further and the news is worse: **the reflash stopped
-working too.** Everything below was tried against one live wedge, in order, with
-the device's own console readable throughout and reporting `usb link: up`,
-`ncm iface: registered`, `stall=0`:
-
-| rung | result |
-|---|---|
-| `Restart-NetAdapter` + static IP (`desktop/nic-restart.ps1`, admin) | no |
-| firmware 3 s USB detach (`x`) | no |
-| physical unplug / replug | recovered **once**, then no |
-| reflash, ~12 s parked in ROM | **no** - this used to work every time |
-| `Disable-PnpDevice` / `Enable-PnpDevice` | no |
-| `pnputil /remove-device` + `/scan-devices` (`desktop/nic-rebuild.ps1`) | no |
-
-The host side is nominally perfect while it fails: driver `UsbNcm.sys`
-10.0.26100.8972 from Microsoft, `DEVPKEY_Device_ProblemCode = 0`, INF
-`usbncm.inf` - so the Zadig/WinUSB hijack the custom PID exists to dodge is not
-what this is. What is wrong is narrower than that:
-
-```
-Status : Disconnected   MediaConnectionState : Unknown   LinkSpeed : 0 bps
-192.168.4.50/24  Manual  AddressState : Tentative
-```
-
-`MediaConnectionState: Unknown` means the miniport **never received the NCM
-`NETWORK_CONNECTION` notification**. When the link is healthy the same adapter
-reads `Connected / 12 Mbps`, which is a `CONNECTION_SPEED_CHANGE` value, so the
-device does send them - just not after a wedge. That notification belongs to
-TinyUSB's `ncm_device.c`, which exposes no API to re-assert it, and the Arduino
-package ships only the headers with the driver precompiled. **There is no
-device-side lever for it from this project.** The firmware's remaining lever is
-the detach, which is why `kBounceDetachMs` is now 12 s rather than 3 - matched
-to the reflash that used to be the only cure.
-
-The surviving hypothesis is that the wedge lives in the **Windows adapter
-instance**, not in the device: `pnputil /remove-device` was followed by the
-adapter returning at the *same* `InterfaceIndex`, because the instance path is
-derived from the bus location and the MAC, and both are stable across a
-reflash - `derive_macs()` seeds from `ESP_MAC_WIFI_STA`. The cheap test costs no
-code: **plug the node into a different USB port**, which changes the instance
-path. If that comes up `Connected`, rotating the advertised MAC becomes a real
-device-side cure; until it is tested, adding that lever would be guessing.
-
-Still missing, and worth capturing next time it wedges: a console reading taken
-**with traffic flowing**, which separates the two shapes in `ncm.h` - stalls
-climbing (REFUSES, curable by the bounce) from a host silently discarding
-(ACCEPTS, not). That needs the DevKitC's **UART port plugged in as well**, as
-`platformio.ini` says: reading the native CDC is fine for `i` and `x`, but it is
-the same cable that disappears during the failure.
-
-#### What the wedge actually is, measured
-
-Everything above narrowed it; the bench and a purpose-built probe finished it.
-
-**1. The USB datapath is not broken.** Against an adapter Windows was reporting
-as `Disconnected / MediaConnectionState: Unknown / 0 bps`, the firmware's own
-synthetic bench was pointed straight into it:
-
-```
-[86s] usb tx=159p 1.90Mb/s stall=0 drop=0
-[87s] usb tx=167p 1.99Mb/s stall=0 drop=0
-[88s] usb tx=168p 2.00Mb/s stall=0 drop=0     ... for nine seconds
-```
-
-The host took **every** frame at full rate and threw it away. That is the
-ACCEPTS shape in `ncm.h`, and it rules out the descriptors, the driver binding,
-the bulk endpoints and the cable in one measurement.
-
-**2. What is missing is the link-state notification, and it is stuck on the
-device side waiting for a host that never reads it.** CDC-NCM delivers link
-state as one 8-byte `NETWORK_CONNECTION` interrupt transfer, sent once when the
-host selects the data interface's alternate setting. A new `n` console command
-re-sends it; against the wedge it refuses, every time, with:
-
-```
-[ncm] relink: endpoint busy - driver holds it
-```
-
-`usbd_edpt_claim()` fails because **netd's original notification transfer is
-still outstanding** - queued at alt-set and never completed, because Windows is
-not issuing IN tokens on that pipe at all. It is simultaneously draining bulk
-NTBs off the same interface at 2 Mb/s.
-
-That single fact explains the whole ladder. Every device-side cure - a 3 s
-bounce, a 12 s detach, a reflash, even a changed MAC - just re-queues a
-notification nobody collects, and every host-side cure short of a reboot leaves
-`usbncm.sys`'s per-instance state intact.
-
-**3. The adapter instance cannot be escaped from the host.** Verified: the
-instance path `USB\VID_303A&PID_8AD1&MI_02\6&24609A99&0&0002` and `ifIndex 17`
-survived a reflash, `pnputil /remove-device` + rescan, and being moved to a
-different physical port. `AIDRONE_MAC_GEN=1` did change the NIC's MAC
-(`02-72-A1-D5-46-CC` -> `...47-CC`) and Windows picked the new MAC up **without**
-creating a new instance, because the device node is keyed on the USB serial
-string (`E072A1D546CC`, from the eFuse MAC), not on the NCM MAC.
-
-That left two suspects: `usbncm.sys`'s per-instance state, or endpoint
-allocation. The next section settles it - it is the instance, and it can be
-rebuilt without a reboot. (Had it been endpoint allocation, the lever would have
-been the CDC console: it reserves IN4/IN5 before NCM takes notify IN 0x83, so
-dropping `ARDUINO_USB_CDC_ON_BOOT` would have moved the notification pipe.)
-
-#### The cure: rebuild the composite PARENT, not the function
-
-Found on the next attempt, and it needs no reboot.
-
-`pnputil /remove-device` on the NCM function (`...&MI_02\...`) rebuilds it under
-the same parent, with the same instance path and the same `ifIndex` - which is
-why rung 2 changed nothing. Removing the **composite parent**
-(`USB\VID_303A&PID_8AD1\E072A1D546CC`) tears down every function driver on the
-device and forces PnP to enumerate it as new:
-
-```
-before : 이더넷 4  idx=17  Disconnected  Unknown  0 bps
-child  : 이더넷 4  idx=17  Disconnected  Unknown  0 bps   <- rung 2, no change
-parent : 이더넷 5  idx=80  Up            Connected 12 Mbps <- rung 3
-RECOVERED by composite-parent rebuild
-```
-
-A genuinely new adapter, `192.168.4.50/24` back to `Preferred`, and the app went
-from `link-down` to `ready` on its next 1 Hz poll with no restart. So the wedge
-**is** per-instance host state, as suspected - the earlier tests only ever failed
-to escape the instance, and the MAC experiment proved why: the device node is
-keyed on the USB serial string, so nothing the firmware advertises can force a
-new one.
-
-`desktop/nic-rebuild.ps1` climbs all three rungs in order and stops at the first
-that works, restoring the static address on whichever adapter it ends up with.
-
-**This does not fix the cause.** Windows still stops polling the notification
-pipe, and it will presumably do it again - it happened ~15 s into a live
-streaming session, not at plug time, so replugging is not the trigger. What has
-changed is the cost: one script, about 40 s, no reboot, and the hatch names it.
-
-#### The control that settles it: the device is not at fault
-
-`relink` was run again with the link **healthy**, over the CH343 UART console so
-nothing about the measurement touched the native cable:
-
-```
-[ncm] relink: sent (total 1)
-[2s] usb=up ... rx=9  stall=0 recov=0/0 relink=1
-```
-
-Sent, not refused - and `rx` climbing shows the host putting its own frames on
-the wire. So the notification endpoint claims, transfers and completes normally
-whenever Windows is polling it. The `endpoint busy` seen during a wedge is not a
-stuck FIFO, a bad endpoint allocation or a descriptor problem: it is TinyUSB's
-transfer still sitting there because **`usbncm.sys` stopped issuing IN tokens on
-a pipe it had been polling a moment earlier.**
-
-That is a Microsoft driver defect, inside a binary this project cannot patch.
-The only way to remove the cause rather than the symptom is to stop depending on
-that driver - and the shipped TinyUSB has `CONFIG_TINYUSB_VENDOR_ENABLED 1`, so
-a vendor bulk interface bound to WinUSB by MS OS 2.0 descriptors is reachable
-without rebuilding the framework.
+The old `link-down` state, Windows adapter readings, static-address probes, USB
+bounces, and `nic-*.ps1` instructions documented a CDC-NCM `UsbNcm.sys`
+per-instance wedge. They are retired historical failure analysis, not an
+operator recovery procedure for the vendor-bulk design.
 
 #### The node's own status LED
 
@@ -1976,23 +1424,21 @@ file through an access-unit splitter yields 6600 "frames" for 600 pictures and
 decodes almost none of them. Check the access-unit count against
 `duration x fps` before trusting any number that comes out of it.
 
-`desktop/fake-tello.ts` then plays that file *at the app*: it answers the SDK
-handshake on UDP, splits the stream into access units, and fragments each one
+`desktop/fake-tello.ts` is a development-only UDP Tello simulator: it answers
+the SDK handshake, splits the stream into access units, and fragments each one
 into 1460 B datagrams that end short - exactly the framing `video.rs`
-reassembles. Two environment variables point the app at it, and the whole
-client runs with no drone, no cable and no NIC setup:
+reassembles. Two environment variables point a development app at it, so this
+exercise needs no drone, cable, or USB device:
 
 ```bash
 bun desktop/fake-tello.ts --fps 30      # --bundle 2 to bunch arrivals
 AIDRONE_TELLO_ADDR=127.0.0.1:8899 AIDRONE_DEVICE_IP=127.0.0.1 app.exe
 ```
 
-The peer port cannot be 8889. The app's command socket binds 8889 on every
-interface, so a simulator on this host cannot also hold it, and sending to
-`127.0.0.1:8889` would loop the app straight back into itself.
+This simulator is not the production USB transport. Production communication
+claims vendor interface 0 and receives bulk records; it does not use a USB NIC
+or a host IP network.
 
-This drives the entire path a drone drives - UDP reassembly, the Channel hop,
-decode, paint - which the earlier devtools-console injection did not.
 `H264Stream` is still deliberately not unit-tested: it needs a real
 `VideoDecoder`, and mocking one would prove less than this does.
 
@@ -2112,8 +1558,8 @@ then 18. Each step was a different defect, and the last one was invisible to
 every number on screen. The order matters, because each was only findable once
 the one before it was gone.
 
-**1. The SPS rewrite never ran on the drone (530 ms).** Captured off the wire
-at 192.168.4.2, the Tello sends its parameter sets in datagrams of their own:
+**1. The SPS rewrite never ran on the drone (530 ms).** Captured from the Tello
+datagram stream, its parameter sets arrive in datagrams of their own:
 
 ```
 nal type  7 (SPS) at byte  1 in datagram 0 (len 13)
@@ -2222,90 +1668,20 @@ decode into Rust on Linux, which trades the WebCodecs architecture for it.
 
 ## Status
 
-Verified on hardware (WEMOS LOLIN S3 Mini + Windows 11 + a real Tello):
+The active product transport is the ESP32-S3 vendor-bulk interface:
 
-1. **The composite device enumerates and Windows binds `UsbNcm.sys` in-box.**
-   Adapter "AIdrone NCM", `Up / 12 Mbps`, static `192.168.4.50/24`. Console and
-   NIC share the one cable as designed. Registration from a global constructor
-   works.
-2. **USB goodput and delay variation - the whole question - are measured.**
-   5.79 Mb/s ceiling, zero loss and sub-millisecond delay at or below
-   4.86 Mb/s, and a queue-delay knee at ~5.8 Mb/s. See the table at the top.
-   Device-side and host-side accounting reconcile exactly.
-3. **Both counters are trustworthy**, which took two fixes to become true: the
-   TinyUSB-task TX wedge and the `rx.ts` sequence-restart misclassification
-   (a `b <rate>` change restarted the generator's counter, and the receiver
-   filed ~10 s of packets as `reorder=500` while silently cancelling real
-   loss). `reorder=0` across every rate change now.
-4. `rx.ts` loss/reorder/duplicate accounting was also smoke-tested against a
-   synthetic stream with a deliberate 10-packet gap, one duplicate and one
-   transposition, and reported exactly that; `--for` produces its summary on
-   Windows, where `process.kill(self, 'SIGINT')` would not.
-5. **The link survives sustained oversubscription.** 32 s at 8 Mb/s requested -
-   ring pinned full, 5.79 Mb/s delivered, 25.5% shed, 65 ms standing queue - and
-   the adapter stayed `Up / 12 Mbps`. Dropping back to 4 Mb/s returned to 0% loss
-   and 0.2 ms delay immediately. Saturation is lossy, not fragile.
-6. **`x` bounces USB and clears a REFUSES stall.** Verified on a live failure:
-   stalls ~1128/s -> 0, TX resuming immediately. Windows still read
-   `Disconnected / 0 bps` afterwards and needed `desktop/nic-restart.ps1`, which
-   returned it to `Up 12 Mbps` with `192.168.4.50`. Two halves, two cures - and
-   neither is guaranteed on a persistent ACCEPTS adapter; see the ladder in
-   defect 2.
-7. **The Wi-Fi leg carries a real Tello's 720p stream, and both sides
-   reconcile.** A 60 s cold start with the shipped handshake: the host took
-   **1502 frames, 25.0 fps, 1.16 Mb/s** with no dropout at all, while the device
-   logged 59 streaming seconds at `wifi rx host` ~131/s in against `usb tx`
-   ~131/s out - a worst-case in-flight gap of 2 packets - with `drop=0/0`,
-   `recov=0/0`, and `stall` peaking at 277/s. An earlier 90 s run gave 2104
-   frames, 23.4 fps and 1.08 Mb/s with `drop=0`, interrupted only by the 6 s
-   self-healing ACCEPTS transient in defect 2. The Tello associated with the
-   soft-AP on its own (`ap=1`), held a lease and answered commands throughout,
-   so the shuttle's MAC demultiplexing does not deafen the soft-AP's DHCP
-   server. Raw data: `desktop/video-coldstart-60s.csv`, `desktop/video-90s.csv`.
-8. **30 s of bench at 2 Mb/s is loss-free end to end.** The receiver took
-   `rx=1511p` with `lost=0 (0.000%)` at 1.94 Mb/s per second, added delay avg
-   0.5 ms / max 6 ms, `reorder=0 dup=0`.
-9. **No bounce loop when nothing drains the NIC** - the regression test for the
-   audible chime. 60 s at 2 Mb/s with no receiver running: `stall` 3-10 per
-   second, `tx=178p 2.02Mb/s` sustained, ring `hi=1.5k`, `drop=0`, zero bounces,
-   and 72 consecutive report lines with the console uninterrupted.
-10. **The receiver's verdict fires once per episode.** Exactly one in a forced
-    test and one in the real video run - no repeats while the stream stayed
-    silent, and no false alarm before a run's first packet.
-11. **The Tauri client decodes and paints a real Tello stream, and its own
-    latency metric is now trustworthy.** 960x720 at 26 fps / 1.20 Mb/s into
-    the WebView with zero decode errors, and both halves of the receive->paint
-    budget measured rather than assumed - 3.0 ms of Tauri IPC, 0.6 ms of
-    WebCodecs decode, 6.1 ms stamp-to-pixel end to end on a paced synthetic
-    stream. Two defects fell out of measuring it; a third reading is still
-    open. See *Desktop app - the receive-to-paint budget*.
-12. **The desktop ground station has an end-to-end simulator proof.** A fresh
-    release build dials on its own, establishes the session, paints the
-    960x720 stream, and renders live telemetry. Holding `W` emits
-    `rc 0 60 0 0` at 10 Hz; releasing it emits `rc 0 0 0 0`; the command console
-    receives the live `battery?` reply. Losing the picture drops the shell to
-    offline and it reconnects itself; controls are inert without a session.
-13. **Native vision modes have simulator evidence.** A generated 960×720
-    `ARUCO_MIP_36h12` ID 0 frame reached the Rust detector with Hamming distance
-    0 at 3 ms analysis time. A 960×720 H.264 person fixture reached bundled
-    YOLO26n end to end and produced four native boxes in 23 ms. Both modes
-    rendered their overlays and emitted no SDK or RC command; keyboard takeoff
-    remained suppressed outside manual mode.
-14. **The shipped marker engine was chosen by measurement, not preference.**
-    Over 596 consecutive live Tello frames AprilTag 3 detected 594 to the
-    `aruco-rs` baseline's 296, with **zero** frames won by the baseline, at
-    roughly half the per-frame cost and no false positives from either on
-    cluttered marker-free frames. The discriminator is apparent marker size
-    (~120 px for the baseline), not blur: its misses were measurably *sharper*
-    than its hits. The baseline detector has since been removed - it cost 3-7 ms
-    of every marker frame to publish a row nobody acted on. See *One marker
-    engine, and the measurement that retired the other*.
+1. The device identifies as `303A:8AD2`, exposes vendor interface 0 with bulk
+   OUT `0x01` and IN `0x81`, and keeps the CDC console on the same cable.
+2. Windows uses the Microsoft OS 2.0 descriptor to bind WinUSB automatically;
+   Ubuntu access is provided by the `.deb`'s udev `uaccess` rule.
+3. The host preserves Tello UDP semantics with the bulk record port map:
+   `8889` control/replies, `8890` state, `11111` video, and `9999` bench.
+4. Vendor-bulk throughput and latency are deliberately not claimed here. The
+   retired CDC-NCM measurements do not characterize this transport.
 
-What still cannot be reconciled the way the USB leg is: **the Wi-Fi leg's own
-loss.** `q = tx + drop` closes the USB accounting because both ends count. The
-Tello exports no transmitted-frame count - see *Drone-side findings* for what
-this unit does answer - so a frame the drone never put on the air is
-indistinguishable from one the ESP32 never saw.
+The Tello safety, H.264 decode, vision, package-build, update, and UI behavior
+documented elsewhere in this README remain applicable. Historical NCM status
+assertions, NIC health reports, and recovery ladders do not.
 
 ### Flashing gotcha
 
@@ -2313,6 +1689,6 @@ indistinguishable from one the ESP32 never saw.
 `Cannot configure port ... OSError(22)` whenever the composite device is
 running - esptool cannot reset it into the bootloader through its own CDC. The
 failed attempt does leave the board in ROM USB-Serial-JTAG (`PID_1001`) at a
-*different* COM number, so the reliable sequence is: attempt the upload, list
-ports, then upload again to the ROM port. Re-enumeration after flashing also
-restores the NCM adapter, which is occasionally the real reason to do it.
+different COM number, so the reliable sequence is: attempt the upload, list
+ports, then upload again to the ROM port. Re-enumeration restores the current
+vendor-bulk and CDC composite device.

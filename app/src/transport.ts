@@ -1,21 +1,24 @@
 /**
  * The one and only seam between this WebView and Tauri. Nothing else under
- * src/ may import @tauri-apps/api: Rust owns every socket and native detector,
- * while the frontend consumes only validated IPC observations and paints them.
+ * src/ may import @tauri-apps/api: Rust owns the USB bulk transport and native
+ * detector, while the frontend consumes only validated IPC observations and
+ * paints them.
  *
  * Rust command surface this file targets:
- *   connect(frames, telemetry, link, drone, vision)
- *   disconnect()
- *   set_vision_mode(mode)             -- native detector selection only
- *   send_command(cmd) -> String       -- raw Tello SDK reply
+ *
+ * - `connect({ frames, telemetry, link, drone, vision })` -> starts one
+ *   serialized Tello session and drives its five channels
+ * - `disconnect()` -> stops it
+ * - `send_command({ cmd })` / `send_rc({ cmd })`
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { ControlMode } from "./control-mode.ts";
 
 /** One snapshot of video.rs's VideoStats, plus the two rates the HUD wants.
- * `fps`/`mbps` are link-side (datagrams off the wire), NOT painted frames --
- * render.ts reports the painted number separately, and the gap between the
- * two is exactly how you tell a network problem from a decode problem. */
+ * `fps`/`mbps` are transport-side (bulk-delivered datagrams), NOT painted
+ * frames -- render.ts reports the painted number separately, and the gap
+ * between the two is exactly how you tell a transport problem from a decode
+ * problem. */
 export type Telemetry = {
   frames: number;
   pkts: number;
@@ -103,17 +106,16 @@ export type VisionPersonEvent = Readonly<{
 export type VisionEvent = VisionStatusEvent | VisionArucoEvent | VisionPersonEvent;
 
 /**
- * One Tello state datagram off UDP 8890, at the drone's own ~10 Hz.
+ * One Tello state payload delivered through a USB bulk record sourced from
+ * UDP 8890 at the drone's own ~10 Hz.
  *
- * Every field is optional on purpose. Firmware revisions add and drop keys, and
- * `state.rs` passes through whatever the drone actually sent rather than
- * asserting a shape - so a panel must render `--` for anything absent instead of
- * assuming a zero. A zero on a flight display is a reading; an absent field is
- * not, and the two must never look alike.
+ * Every field is optional on purpose. Firmware revisions add and drop keys,
+ * and `state.rs` passes through whatever the drone actually sent rather than
+ * inventing defaults that might look like measurements.
  *
- * Units are the SDK's own: `h`/`tof`/`baro` cm, `bat` %, `time` s (motor-on),
- * `pitch`/`roll`/`yaw` degrees, `agx`/`agy`/`agz` 0.001 g. `vgx`/`vgy`/`vgz`
- * carry NO documented unit in the SDK, so nothing in this app labels them.
+ * `recvEpochUs` is the host wall-clock receive time, in microseconds. It is
+ * deliberately separate from the Tello's `time`, which is flight seconds and
+ * may reset between state packets.
  */
 export type DroneState = {
   pitch?: number;
@@ -132,17 +134,16 @@ export type DroneState = {
   agx?: number;
   agy?: number;
   agz?: number;
-  /** Host wall clock when the datagram landed, so a panel can grey out state
-   *  that stopped arriving while the app still says "connected". */
+  /** Host wall clock when the state payload landed, so a panel can grey out
+   *  state that stopped arriving while the app still says "connected". */
   recvEpochUs: number;
 };
 
-/** The four sockets the link is made of, resolved through the same env
- *  overrides Rust uses - so a simulator run shows the simulator's addresses. */
+/** The USB bulk record routes Rust exposes for diagnostics and simulator parity. */
 export type Endpoints = { node: string; tello: string; state: string; video: string };
 
 /** One preflight result. `ok` is the only thing the UI colours on; `detail`
- *  carries the drone's verbatim answer or the bind error. */
+ * carries the native USB bulk route or drone response. */
 export type Probe = { id: string; label: string; detail: string; ok: boolean };
 
 type Sink<A extends unknown[]> = (...args: A) => void;
@@ -672,35 +673,27 @@ export function onRcError(cb: (message: string) => void): () => void {
   return rcErrorSubs.add(cb);
 }
 
-/** The four sockets, as Rust resolves them. Safe to call with no session. */
+/** The USB bulk node, as Rust sees it. Safe to call with no session. */
 export async function endpoints(): Promise<Endpoints> {
   return await invoke<Endpoints>("endpoints");
 }
 
 /**
- * The node's network link, in the three states an operator has three different
- * answers to. Rust owns the definition - see `node_link` in `lib.rs`.
+ * The USB bulk device has two operator-meaningful states:
  *
- * - `ready` - an address on the node's `/24` exists and can be bound. The only
- *   state in which the node can be talked to.
- * - `link-down` - the address is configured but unusable. The device is
- *   plugged in; the link it should present is not up. Distinct from `absent`
- *   because the remedy is, and reporting the two as one sent an operator to
- *   check a cable that was already in.
- * - `absent` - no adapter carries the node's `/24`.
+ * - `ready` - WinUSB/libusb can open vendor interface 0.
+ * - `absent` - the device is not currently accessible. Check the cable and,
+ *   on Linux, the installed udev permission rule.
  */
-export type NodeLink = "ready" | "link-down" | "absent";
+export type NodeLink = "ready" | "absent";
 
-/**
- * Costs no packet: Rust reads the adapter list and binds only addresses already
- * on the node's own `/24`. Safe to poll, and safe beside a live session.
- */
+/** Checks whether Rust can access the USB bulk vendor interface. */
 export async function nodeLink(): Promise<NodeLink> {
   return await invoke<NodeLink>("node_link");
 }
 
-/** Probes each socket and the drone itself. Takes ~2 s and cannot run while a
- *  session holds the ports. */
+/** Probes the USB bulk routes and drone. Takes ~2 s and cannot run while a
+ * session holds the transport. */
 export async function preflight(): Promise<Probe[]> {
   return await invoke<Probe[]>("preflight");
 }

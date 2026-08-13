@@ -1,16 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "windows": {
-      "nsis": {
-        "installerHooks": "installer/windows/hooks.nsh",
-        "installMode": "perMachine"
-      }
-    },
     "resources": {
       "models/yolo26n.onnx": "models/yolo26n.onnx",
       "models/ggml-base-q5_1.bin": "models/ggml-base-q5_1.bin",
-      "installer/windows/aidrone-link.ps1": "installer/windows/aidrone-link.ps1",
 
       "target/release/avcodec-*.dll": "",
       "target/release/avformat-*.dll": "",

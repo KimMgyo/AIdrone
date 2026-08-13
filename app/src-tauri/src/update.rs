@@ -2,9 +2,9 @@
 //!
 //! Why this is hand-written rather than `tauri-plugin-updater`: the plugin
 //! cannot update a `.deb`, and on Ubuntu a `.deb` is not a packaging preference
-//! - it is the only artifact that can declare `gstreamer1.0-libav` and run the
-//! USB-NCM maintainer scripts. An AppImage does neither, which is exactly the
-//! failure that made the first Ubuntu release unusable.
+//! - it is the only artifact that can declare `gstreamer1.0-libav` and install
+//! the USB bulk-device udev permission rule. An AppImage does neither, which
+//! is exactly the failure that made the first Ubuntu release unusable.
 //!
 //! What it does: reads the newest release (prereleases included - every build
 //! here is one, tagged `build-<sha>`), picks the artifact for this platform,

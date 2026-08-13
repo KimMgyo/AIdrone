@@ -17,20 +17,20 @@
  */
 import type { ControlMode } from "../control-mode.ts";
 import type { NodeLink } from "../transport.ts";
-import { mmss, must, style, text } from "../ui.ts";
+import { must, style, text } from "../ui.ts";
 
 /**
- * The connection, as the shell needs to show it - and it is two connections,
- * not one. The node is a USB network adapter; the drone is a radio peer behind
- * it. They fail separately and the fixes are different, so a single "연결됨"
- * hid the one thing an operator needs to know first: plug the cable in, or
- * power-cycle the drone.
+ * The connection, as the shell needs to show it, has two peers. The node is a
+ * USB bulk transport; the drone is a radio peer behind it. They fail
+ * separately and the remedies differ, so a single "연결됨" hid the first
+ * thing an operator needs to know: plug the cable in, or power-cycle the
+ * drone.
  *
- * `node` is three-valued rather than a boolean, because "no node" turned out to
- * be two situations with two remedies - see `NodeLink` in `transport.ts`.
+ * `node` is two-valued because the direct vendor interface is either available
+ * to Rust or absent. There is no network-link state to infer.
  *
- * `drone` is `null`, never `false`, while the node is not ready: with no path to
- * the aircraft, calling it silent would be a claim this app cannot make.
+ * `drone` is `null`, never `false`, while the node is not ready: with no path
+ * to the aircraft, calling it silent would be a claim this app cannot make.
  */
 export type LinkView = {
   phase: "connecting" | "online" | "offline";
@@ -72,9 +72,6 @@ export type StationModel = {
   /** Painted frames in the last second - the pipeline's own output rate, which
    *  is not the link's arrival rate and must not be read as it. */
   fps: number | null;
-  bat: number | null;
-  /** Motor-on seconds, straight off the drone's state datagram. */
-  flightS: number | null;
   status: string;
   rxPktsPerSec: number | null;
   mbps: number | null;
@@ -140,17 +137,10 @@ const PHASE_COPY: Record<LinkView["phase"], string> = {
   offline: "오프라인",
 };
 
-/**
- * The node cell, which has three readings because the link has three states and
- * two of them used to read the same.
- *
- * `링크 없음` is amber, not red: the hardware is there and the operator has
- * something specific to do about it, which is not the same news as a cable that
- * is not plugged in.
- */
+/** The node cell reflects direct vendor-interface availability, not an inferred
+ * network adapter state. */
 const NODE_COPY: Record<NodeLink, { copy: string; dot: string }> = {
   ready: { copy: "연결됨", dot: "bg-ok" },
-  "link-down": { copy: "링크 없음", dot: "bg-warn" },
   absent: { copy: "없음", dot: "bg-alert" },
 };
 
@@ -276,25 +266,14 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
             <div data-k="hatch-detail" class="max-w-[520px] text-center font-mono text-[10.5px] leading-[1.6] text-[#373F49]"></div>
           </div>
           <canvas id="video" width="960" height="720" class="absolute inset-0"></canvas>
-          <div data-k="m-overlay" class="absolute inset-0 pointer-events-none"></div>
-          <!-- Battery and flight time sit on the picture, not in the top bar.
-               They are the two readings an operator checks while flying, and
-               flying means watching this rectangle - a number two feet away
-               from where the eyes are is a number nobody reads in time.
-               Bottom-left, out of the way of a subject that tends to be
-               centred, and pointer-events-none so it can never eat a click
+          <!-- Battery and flight time used to sit here, in their own box in the
+               picture's bottom-left. They now ride the stage overlay's own top
+               bar, which is still ON the picture and still inside the rectangle
+               a pilot watches while flying - a reading two feet from where the
+               eyes are is a reading nobody takes in time. This mount stays
+               pointer-events-none, so nothing the overlay draws can eat a click
                meant for the stage. -->
-          <div data-k="aircraft" class="absolute left-[13px] bottom-[11px] flex items-end gap-[13px] pointer-events-none rounded-[3px] border border-line2/70 bg-bg/70 px-[10px] py-[6px]" hidden>
-            <div class="flex flex-col gap-[1px]">
-              <div class="font-mono text-[9px] tracking-[.14em] text-dim3">BATTERY</div>
-              <div data-k="bat" class="font-mono text-[15px] leading-none text-dim">--</div>
-            </div>
-            <div class="w-px self-stretch bg-line2"></div>
-            <div class="flex flex-col gap-[1px]">
-              <div class="font-mono text-[9px] tracking-[.14em] text-dim3">FLIGHT</div>
-              <div data-k="flight" class="font-mono text-[15px] leading-none text-ink2">--</div>
-            </div>
-          </div>
+          <div data-k="m-overlay" class="absolute inset-0 pointer-events-none"></div>
         </div>
         <div data-k="m-console" class="flex-none border-t border-line bg-sunken flex flex-col"></div>
       </div>
@@ -365,13 +344,6 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     hatchState: q("hatch-state", HTMLDivElement),
     hatchDetail: q("hatch-detail", HTMLDivElement),
     rtt: q("rtt", HTMLSpanElement),
-    bat: q("bat", HTMLDivElement),
-    flight: q("flight", HTMLDivElement),
-    // `aircraft`, not `hud`: the stage overlay already owns a `hud` for
-    // ALT/SPD/YAW, and both live under this mount. The two only stayed apart
-    // because this install runs before the overlay fills its own container -
-    // an ordering nobody should have to know about.
-    aircraft: q("aircraft", HTMLDivElement),
     takeoff: q("takeoff", HTMLButtonElement),
     land: q("land", HTMLButtonElement),
     status: q("status", HTMLDivElement),
@@ -481,9 +453,6 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       style(hatch, "display", m.live ? "none" : "block");
       style(hatchLabel, "display", m.live ? "none" : "flex");
       style(canvas, "display", m.live ? "block" : "none");
-      // The readout belongs to the picture, so it lives and dies with it -
-      // over the hatch it would be two dashes floating on a texture.
-      cell.aircraft.hidden = !m.live;
       // Neither command means anything without a link, and a button that looks
       // pressable when it is not is the panel making a promise for the drone.
       cell.takeoff.disabled = !m.live;
@@ -507,21 +476,6 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
         text(cell.updateApply, m.update.applying ? "설치 중" : "설치");
         if (m.update.error !== null) cell.updateApply.title = m.update.error;
       }
-
-      // Battery and flight time are painted onto the picture (see `hud`); every
-      // measurement of the picture's own path lives in the strip below.
-
-      // Battery is the one readout that changes colour, and it uses the drone's
-      // own thresholds: a Tello's SDK channel gets unreliable well before the
-      // pack is empty (README, three separate sessions died that way).
-      const battery = finite(m.bat);
-      text(cell.bat, battery === null ? MISSING : `${battery}%`);
-      const batTone =
-        battery === null ? "text-dim" : battery >= 30 ? "text-ok" : battery >= 15 ? "text-warn" : "text-alert";
-      cell.bat.className = `font-mono text-[15px] leading-none ${batTone}`;
-
-      const flight = finite(m.flightS);
-      text(cell.flight, flight === null ? MISSING : mmss(flight));
 
       text(cell.status, known(m.status));
       const rx = finite(m.rxPktsPerSec);

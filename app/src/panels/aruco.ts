@@ -89,6 +89,15 @@ const PAD_CELL = "h-[17px] w-[17px] cursor-pointer ring-inset ring-[0.5px] ring-
 const PAD_CELL_OFF = `${PAD_CELL} bg-black`;
 const PAD_CELL_ON = `${PAD_CELL} bg-white`;
 
+/**
+ * Geometry for all three pad actions, shared so they cannot drift apart.
+ *
+ * The three differ by colour only. Sizing them individually is how one of them
+ * ends up a few pixels shorter than the others, and a column of buttons that do
+ * not line up reads as three unrelated controls instead of one set.
+ */
+const PAD_BUTTON = "h-[26px] w-full rounded-[3px] border px-[9px] font-mono text-[10.5px]";
+
 function reconcileMarkerRows(
   list: HTMLDivElement,
   note: HTMLDivElement,
@@ -300,6 +309,14 @@ function packGrid(grid: readonly boolean[]): number {
   return code;
 }
 
+/** `packGrid`'s inverse: one dictionary code back into the 6x6 grid it packs from. */
+function unpackGrid(code: number): boolean[] {
+  const out: boolean[] = [];
+  // `2 ** n`, never a shift - same 36-bit reason as `drawMarker`.
+  for (let bit = 0; bit < MIP_CELLS * MIP_CELLS; bit++) out.push(Math.floor(code / 2 ** (35 - bit)) % 2 === 1);
+  return out;
+}
+
 /** One quarter turn clockwise. */
 function rotateGrid(grid: readonly boolean[]): boolean[] {
   const out: boolean[] = [];
@@ -377,11 +394,20 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
           <div data-k="pad" class="grid grid-cols-6 gap-0"></div>
         </div>
         <div class="flex min-w-0 flex-1 flex-col gap-[6px]">
-          <div data-k="pad-id" class="font-mono text-[13px] text-dim">일치 없음</div>
+          <!-- The id is an editable view of the pad, not a readout: an operator
+               who already knows the number should not have to click 36 cells to
+               reach it, and one who drew it should still see what it names. The
+               placeholder carries 일치 없음 so an unnamed drawing costs no line. -->
+          <input data-k="pad-id" type="text" inputmode="numeric" placeholder="일치 없음" aria-label="마커 ID"
+            autocomplete="off" spellcheck="false"
+            class="h-[26px] w-full min-w-0 rounded-[3px] border border-line2 bg-sunken px-[7px] font-mono text-[13px] text-ink focus:border-line4 focus:outline-none" />
+          <div data-k="pad-note" class="font-mono text-[10px] text-dim2"></div>
           <button data-k="pad-add" type="button" disabled
-            class="h-[26px] rounded-[3px] border border-line4 bg-key px-[9px] font-mono text-[10.5px] text-dim enabled:cursor-pointer enabled:hover:bg-btn enabled:hover:text-ink2 disabled:opacity-40">목록에 추가</button>
+            class="${PAD_BUTTON} border-line4 bg-key text-dim enabled:cursor-pointer enabled:hover:bg-btn enabled:hover:text-ink2 disabled:opacity-40">목록에 추가</button>
+          <button data-k="pad-random" type="button" disabled
+            class="${PAD_BUTTON} border-line2 bg-sunken text-dim2 enabled:cursor-pointer enabled:hover:border-line4 enabled:hover:text-ink2 disabled:opacity-40">랜덤 생성</button>
           <button data-k="pad-clear" type="button"
-            class="h-[22px] rounded-[3px] border border-line2 bg-sunken px-[9px] font-mono text-[10px] text-dim2 cursor-pointer hover:border-line4 hover:text-ink2">지우기</button>
+            class="${PAD_BUTTON} border-line2 bg-sunken text-dim2 cursor-pointer hover:border-line4 hover:text-ink2">지우기</button>
         </div>
       </div>
     </section>
@@ -391,14 +417,29 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   const markerList = must("[data-k=marker-list]", HTMLDivElement, mount);
   const markerNote = must("[data-k=marker-note]", HTMLDivElement, mount);
   const pad = must("[data-k=pad]", HTMLDivElement, mount);
-  const padId = must("[data-k=pad-id]", HTMLDivElement, mount);
+  const padId = must("[data-k=pad-id]", HTMLInputElement, mount);
+  const padNote = must("[data-k=pad-note]", HTMLDivElement, mount);
   const padAdd = must("[data-k=pad-add]", HTMLButtonElement, mount);
+  const padRandom = must("[data-k=pad-random]", HTMLButtonElement, mount);
   const markerRowNodes = new Map<number, MarkerRow>();
 
   /** The drawn payload, and the codebook once Rust has answered. */
   const grid: boolean[] = new Array<boolean>(MIP_CELLS * MIP_CELLS).fill(false);
   let codes: readonly number[] = [];
   let drawn: { id: number; distance: number } | null = null;
+  /**
+   * Set while the id field holds something the dictionary cannot name.
+   *
+   * The pad still shows the last pattern, so without this the field would read
+   * 99999 while 목록에 추가 quietly added whatever was drawn before it.
+   */
+  let fieldError = false;
+
+  /** The pad grid stays the source of truth, so a code is copied into the array
+   *  the painters close over rather than replacing it. */
+  function drawCode(code: number): void {
+    for (const [index, on] of unpackGrid(code).entries()) grid[index] = on;
+  }
 
   const cells = Array.from({ length: MIP_CELLS * MIP_CELLS }, (_, index) => {
     const cell = document.createElement("button");
@@ -410,18 +451,44 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     return cell;
   });
 
-  function paintPad(): void {
+  /**
+   * `syncField` is false only while the operator is typing into the field: the
+   * pad follows the digits, but rewriting the digits underneath them would move
+   * the caret and fight the keystroke.
+   */
+  function paintPad(syncField = true): void {
     for (const [index, cell] of cells.entries()) cls(cell, grid[index] ? PAD_CELL_ON : PAD_CELL_OFF);
     drawn = codes.length === 0 ? null : matchGrid(grid, codes);
+    // Guarded like the roster's size field: an unconditional `value` write is
+    // not free, and it drops the selection on a field the operator just left.
+    if (syncField) {
+      const shown = drawn === null ? "" : String(drawn.id);
+      if (padId.value !== shown) padId.value = shown;
+    }
     // The distance is printed when there is one, because a drawing that needed
     // correcting is worth knowing about: it is either a mis-clicked cell or a
-    // print this operator should look at again.
+    // print this operator should look at again. An exact match says nothing:
+    // the id in the field above is the whole answer.
+    const drifted = !fieldError && drawn !== null && drawn.distance > 0;
+    // An emptied field names nothing, which is not the same complaint as a
+    // number the dictionary does not have - saying 없는 ID to someone who just
+    // cleared the box blames them for a digit they deleted.
+    const fieldNote = padId.value.trim() === "" ? "일치 없음" : "없는 ID";
     text(
-      padId,
-      drawn === null ? "일치 없음" : drawn.distance === 0 ? `ID ${drawn.id}` : `ID ${drawn.id} · ${drawn.distance}비트 차이`,
+      padNote,
+      codes.length === 0
+        ? "사전 로딩 중"
+        : fieldError
+          ? fieldNote
+          : drawn === null
+            ? "일치 없음"
+            : drifted
+              ? `${drawn.distance}비트 차이`
+              : "",
     );
-    cls(padId, `font-mono text-[13px] ${drawn === null ? "text-dim" : "text-warn"}`);
-    padAdd.disabled = drawn === null;
+    cls(padNote, `font-mono text-[10px] ${drifted ? "text-warn" : "text-dim2"}`);
+    padAdd.disabled = fieldError || drawn === null;
+    padRandom.disabled = codes.length === 0;
   }
 
   let current = deps.vision.arucoSnapshot();
@@ -451,6 +518,7 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     const cell = readId(button.dataset.cell);
     if (cell !== null && cell < grid.length) {
       grid[cell] = !grid[cell];
+      fieldError = false;
       paintPad();
       return;
     }
@@ -459,14 +527,28 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
       // Adding a drawn marker cannot arm the loop by itself: an unmeasured tag
       // stays unfollowable, which the target box reports as 크기 필요 until a
       // size is typed into its row.
-      if (drawn === null) return;
+      if (fieldError || drawn === null) return;
       deps.vision.addArucoMarker(drawn.id);
       if (deps.sizes.get(drawn.id) !== null) deps.vision.setArucoTarget(drawn.id);
       return;
     }
 
+    if (button.dataset.k === "pad-random") {
+      // Picked out of the codebook, not out of 36 coin flips: a random pattern
+      // is essentially never within PAD_MATCH_BITS of a codeword, so it would
+      // name no marker and could not be printed as one - a drawing nobody can
+      // use. The button is disabled until the codebook lands, and refuses here
+      // too because disabling is only a rendering detail.
+      if (codes.length === 0) return;
+      drawCode(codes[Math.floor(Math.random() * codes.length)]);
+      fieldError = false;
+      paintPad();
+      return;
+    }
+
     if (button.dataset.k === "pad-clear") {
       grid.fill(false);
+      fieldError = false;
       paintPad();
       return;
     }
@@ -485,7 +567,34 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
     deps.vision.setArucoTarget(id);
   };
 
+  /**
+   * While the field is being typed into it drives the pad, not the reverse: a
+   * valid id draws that marker's own pattern. Anything else - empty, not a
+   * number, or past the end of the dictionary - is held as an error instead of
+   * being left to name whatever pattern happens to still be drawn.
+   */
+  const syncFromField = (): void => {
+    const raw = padId.value.trim();
+    const typed = raw === "" ? null : readId(raw);
+    if (typed === null || typed >= codes.length) {
+      fieldError = true;
+    } else {
+      fieldError = false;
+      drawCode(codes[typed]);
+    }
+    // The caret is in the field, so the field is the one thing not repainted.
+    paintPad(false);
+  };
+
+  /** Leaving the field cannot leave it showing something the pad does not draw. */
+  const onFieldBlur = (): void => {
+    fieldError = false;
+    paintPad();
+  };
+
   mount.addEventListener("click", onClick);
+  padId.addEventListener("input", syncFromField);
+  padId.addEventListener("blur", onFieldBlur);
   const unsubscribe = deps.vision.subscribeAruco(paint);
   const unsubscribeSizes = deps.sizes.subscribe(() => {
     paint(current);
@@ -497,7 +606,11 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
   void markerCodes()
     .then((table) => {
       codes = table;
-      paintPad();
+      // An id typed before the codebook landed was refused for having nothing
+      // to check against; now there is, so it is re-read rather than left
+      // sitting as 없는 ID against a dictionary that has since arrived.
+      if (padId.value.trim() === "") paintPad();
+      else syncFromField();
       paint(current);
     })
     .catch(() => {
@@ -511,6 +624,8 @@ export function installArucoPanel(mount: HTMLElement, deps: ArucoPanelDeps): Aru
       unsubscribe();
       unsubscribeSizes();
       mount.removeEventListener("click", onClick);
+      padId.removeEventListener("input", syncFromField);
+      padId.removeEventListener("blur", onFieldBlur);
     },
   };
 }

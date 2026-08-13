@@ -883,10 +883,10 @@ mod tests {
         0x67, 0x42, 0xc0, 0x1f, 0xd9, 0x00, 0xf0, 0x16, 0xe4,
     ];
 
-    /// Captured off a real Tello (2026-08-12, 192.168.4.2 over USB-NCM): Main
-    /// profile, level 4.0, 960x720, `max_num_ref_frames = 1`, no VUI - and it
-    /// arrives ALONE in a 13-byte datagram, followed by one trailing zero
-    /// byte. Both properties are the test.
+    /// Captured from a real Tello (2026-08-12): Main profile, level 4.0,
+    /// 960x720, `max_num_ref_frames = 1`, no VUI - and it arrives ALONE in a
+    /// 13-byte datagram, followed by one trailing zero byte. Both properties
+    /// are the test.
     const REAL_TELLO_SPS: [u8; 10] = [
         0x67, 0x4d, 0x40, 0x28, 0x95, 0xa0, 0x3c, 0x05, 0xb9, 0x00,
     ];

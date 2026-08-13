@@ -1,6 +1,6 @@
 # Bring-up helper: dump what Windows made of the ESP32's composite device.
-# The question it answers is always the same one - did UsbNcm.sys bind to the
-# NCM function, and if not, which compatible ID did the device actually offer?
+# It verifies that interface 0 was bound to WinUSB, so the desktop app can
+# claim the vendor bulk endpoints.
 $ErrorActionPreference = 'SilentlyContinue'
 
 $keys = @(
@@ -23,12 +23,4 @@ Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'VID_303A' } | 
 }
 
 Write-Output ""
-Write-Output "=== in-box NCM driver present? ==="
-Get-WindowsDriver -Online -All |
-  Where-Object { $_.OriginalFileName -match 'usbncm|ncm' } |
-  Select-Object Driver, OriginalFileName, ClassName |
-  Format-Table -AutoSize | Out-String -Width 200
-Test-Path "$env:SystemRoot\System32\drivers\UsbNcm.sys" |
-  ForEach-Object { Write-Output "UsbNcm.sys on disk: $_" }
-Test-Path "$env:SystemRoot\INF\usbncm.inf" |
-  ForEach-Object { Write-Output "usbncm.inf on disk: $_" }
+Write-Output "Expected vendor function: MI_00 with Service=WINUSB and ProblemCode=0."

@@ -58,11 +58,9 @@ const LATENCY_WINDOW = 100;
  * bundling.
  *
  * Painting now happens on arrival, so a queue can only form inside one
- * `decode()` callback - two decoder outputs really do land together (link-side
- * arrival gaps are 34 ms at p50 but reach 0.1 ms at the low tail, and USB-NCM
- * bundles several Ethernet frames into one transfer). Both get drawn; the
- * limit only bounds a pathological burst, and `dropped` climbing means bundles
- * deeper than this. */
+ * `decode()` callback. H.264 decode can emit two outputs together; both get
+ * drawn. The limit only bounds a pathological burst, and `dropped` climbing
+ * means the burst exceeded it. */
 const PAINT_QUEUE_MAX = 2;
 
 export class VideoRenderer {

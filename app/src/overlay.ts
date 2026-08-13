@@ -7,11 +7,18 @@ import type {
   PersonTarget,
 } from "./lib/aruco.ts";
 import type { DroneState, VisionStatusEvent } from "./transport.ts";
-import { cls, must, style, text } from "./ui.ts";
+import { cls, mmss, must, style, text } from "./ui.ts";
 
 const MISSING = "--";
 const DOT = "w-[6px] h-[6px] rounded-full";
 const STREAM = "flex-1 min-w-0 font-mono text-[10.5px] text-[#7C848F] truncate";
+/** The top bar's left-hand chips - LIVE, BATTERY, FLIGHT - are one object with
+ *  three payloads. Hoisted because three chips that have to read as a single
+ *  group will not stay one if their geometry is typed out three times. */
+const CHIP =
+  "flex-none flex items-center gap-[7px] h-[24px] px-[9px] bg-bg/75 border border-line3 rounded-[3px]";
+const CHIP_CAPTION = "font-mono text-[9px] tracking-[.14em] text-dim3";
+const CHIP_VALUE = "font-mono text-[10.5px] leading-none whitespace-nowrap";
 const CROSS = "absolute left-1/2 top-1/2 w-[200px] h-[200px] -ml-[100px] -mt-[100px]";
 const HUD =
   "absolute left-[15px] top-1/2 -translate-y-1/2 font-mono text-[10.5px] text-[#7C848F] leading-[2.1]";
@@ -93,11 +100,29 @@ type Rect = { left: string; top: string; width: string; height: string };
  */
 export function installStageOverlay(mount: HTMLElement): StageOverlay {
   mount.innerHTML = `
-    <div class="absolute top-[13px] left-[15px] right-[47px] flex items-center justify-between gap-[12px] min-w-0">
+    <!-- Both insets are equal. The LIVE group sits flush with the picture's
+         left edge and the MODE chip with its right, and nothing else owns a top
+         corner - fullscreen lives in the window header, not on the stage - so a
+         control that wants one has to widen that side deliberately here. -->
+    <div class="absolute top-[13px] left-[15px] right-[15px] flex items-center justify-between gap-[12px] min-w-0">
       <div class="flex min-w-0 flex-1 items-center gap-[11px]">
-        <div class="flex-none flex items-center gap-[7px] h-[24px] px-[9px] bg-bg/75 border border-line3 rounded-[3px]">
+        <div class="${CHIP}">
           <div data-k="dot" class="${DOT} bg-dim3"></div>
           <div class="font-mono text-[10.5px] text-ink">LIVE</div>
+        </div>
+        <!-- Battery and flight time are the two readings an operator checks
+             while flying, and flying means watching this rectangle. The stage's
+             own top bar is still on the picture and still inside the frame the
+             eyes are already in; a number in a side panel is a number nobody
+             reads in time. Only the stream text may absorb a squeeze, so the
+             chips stay flex-none and their values never wrap. -->
+        <div data-k="bat-chip" class="${CHIP}" hidden>
+          <div class="${CHIP_CAPTION}">BATTERY</div>
+          <div data-k="bat" class="${CHIP_VALUE} text-dim">${MISSING}</div>
+        </div>
+        <div data-k="flight-chip" class="${CHIP}" hidden>
+          <div class="${CHIP_CAPTION}">FLIGHT</div>
+          <div data-k="flight" class="${CHIP_VALUE} text-ink2">${MISSING}</div>
         </div>
         <div data-k="stream" class="${STREAM} hidden">${MISSING}</div>
       </div>
@@ -132,6 +157,10 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
   `;
 
   const dot = must('[data-k="dot"]', HTMLDivElement, mount);
+  const batChip = must('[data-k="bat-chip"]', HTMLDivElement, mount);
+  const batCell = must('[data-k="bat"]', HTMLDivElement, mount);
+  const flightChip = must('[data-k="flight-chip"]', HTMLDivElement, mount);
+  const flightCell = must('[data-k="flight"]', HTMLDivElement, mount);
   const stream = must('[data-k="stream"]', HTMLDivElement, mount);
   const modeDot = must('[data-k="mode-dot"]', HTMLDivElement, mount);
   const modeCell = must('[data-k="mode"]', HTMLDivElement, mount);
@@ -294,6 +323,22 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
       // thing that can disagree with it.
       const sized = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
       text(stream, sized ? `${width}×${height} · ${aspect(width, height)}` : MISSING);
+
+      // Both chips belong to the picture, so they live and die with it: over the
+      // connection hatch they would be two dashes floating on a texture.
+      batChip.hidden = !m.live;
+      flightChip.hidden = !m.live;
+      // Battery is the one readout that changes colour, and the thresholds are
+      // the drone's, not a linear scale: a Tello's SDK channel gets unreliable
+      // well before the pack is empty (README, three separate sessions died
+      // that way).
+      const battery = finiteNumber(s?.bat);
+      text(batCell, battery === null ? MISSING : `${battery}%`);
+      const batTone =
+        battery === null ? "text-dim" : battery >= 30 ? "text-ok" : battery >= 15 ? "text-warn" : "text-alert";
+      cls(batCell, `${CHIP_VALUE} ${batTone}`);
+      const flightS = finiteNumber(s?.time);
+      text(flightCell, flightS === null ? MISSING : mmss(flightS));
 
       const altCm = finiteNumber(s?.h);
       text(altCell, altCm === null ? MISSING : `${(altCm / 100).toFixed(2)} m`);

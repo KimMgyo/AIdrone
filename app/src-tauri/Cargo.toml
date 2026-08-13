@@ -1,7 +1,7 @@
 [package]
 name = "app"
 version = "0.1.17"
-description = "Tello viewer over the USB-NCM cable - Rust owns the drone link, WebCodecs owns decode"
+description = "Tello viewer over the ESP32 USB vendor-bulk link - Rust owns the drone link, WebCodecs owns decode"
 authors = ["you"]
 edition = "2021"
 
@@ -55,14 +55,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Only for the retry backoff; Tauri's runtime is already tokio.
 tokio = { version = "1", features = ["time"] }
-# The ONE thing std cannot answer about the node's link: which addresses this
-# host has CONFIGURED, as opposed to which it can bind. On Windows a
-# media-disconnected adapter keeps its static address in `Tentative` state -
-# listed and unbindable at once - and that is exactly the difference between
-# "check the cable" and "the node is plugged in but its link is down".
-# `if-addrs` was tried first and drops Tentative addresses, which is the only
-# case this is here for.
-network-interface = "2"
+# Cross-platform host-side vendor bulk transport. Windows uses the firmware's
+# MS OS 2.0 WinUSB binding; Linux accesses the same interface through usbfs.
+parking_lot = "0.12"
+nusb = "0.2.7"
 # Speech to text, and the reason it is native rather than a WebView API: the
 # app ships on Windows AND Ubuntu, WebKitGTK has no `SpeechRecognition` at all,
 # and a cloud STT would need a provider the router does not have connected.

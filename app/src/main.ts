@@ -88,9 +88,9 @@ const SHELL_HZ_MS = 250;
  *  reading, because a frozen number looks exactly like a steady one. */
 const STATE_STALE_MS = 2_000;
 
-/** Native `connect()` proves UDP frame batches arrived, not that WebKit decoded
- * one. Do not expose flight controls until the current renderer has painted a
- * real frame; two IDR periods leave room for a transient decoder recovery. */
+/** Native `connect()` proves USB bulk frame records arrived, not that WebKit
+ * decoded one. Do not expose flight controls until the current renderer has
+ * painted a real frame; two IDR periods leave room for a transient decoder recovery. */
 const FIRST_PAINT_TIMEOUT_MS = 5_000;
 const FIRST_PAINT_POLL_MS = 50;
 
@@ -195,8 +195,8 @@ follow.subscribe((state, reason) => {
  * engaged and centred, and resumes on its own.
  */
 function pushFollowTarget(): void {
-  // A native link can have UDP ingress while its decoder has not produced a
-  // frame. Never let an early mode change turn a queued observation into RC.
+  // A native link can have USB bulk ingress while its decoder has not produced
+  // a frame. Never let an early mode change turn a queued observation into RC.
   if (!controlsReady) {
     follow.update(false, null, mode === "person" ? PERSON_DESIRED_SIZE : ARUCO_DESIRED_SIZE);
     return;
@@ -579,9 +579,9 @@ async function firstPaintFailure(candidate: VideoRenderer): Promise<string> {
 }
 
 /** Waits for the last connection boundary: a real decoded frame on this
- * canvas. The native handshake has already proved UDP ingress by this point,
- * but a missing WebKit/GStreamer decoder would otherwise look connected and
- * leave an operator with controls over a black display. */
+ * canvas. The native handshake has already proved USB bulk ingress by this
+ * point, but a missing WebKit/GStreamer decoder would otherwise look connected
+ * and leave an operator with controls over a black display. */
 async function waitForFirstPaint(candidate: VideoRenderer): Promise<void> {
   const deadline = performance.now() + FIRST_PAINT_TIMEOUT_MS;
   for (;;) {
@@ -605,12 +605,12 @@ async function waitForFirstPaint(candidate: VideoRenderer): Promise<void> {
  * because there was never a decision to make: every launch ended with the
  * operator pressing the same button until a picture appeared.
  *
- * **A picture is the definition of connected.** Not a resolved handshake, not
- * UDP arriving - those can all be true while the operator stares at a black
- * canvas, which is the failure this app has hit most. So `online` means frames
- * are painting, and the moment they stop for `PICTURE_STALL_MS` the session is
- * torn down and dialled again. `link.rs`'s own silence event is a symptom
- * report, not the verdict; the verdict is `stats.painted`.
+ * **A picture is the definition of connected.** Not an opened USB handle, not
+ * a bulk record arriving - those can all be true while the operator stares at
+ * a black canvas, which is the failure this app has hit most. So `online` means
+ * frames are painting, and the moment they stop for `PICTURE_STALL_MS` the
+ * session is torn down and dialled again. `link.rs`'s own silence event is a
+ * symptom report, not the verdict; the verdict is `stats.painted`.
  */
 const RETRY_MIN_MS = 1_500;
 const RETRY_MAX_MS = 8_000;
@@ -619,9 +619,9 @@ const RETRY_MAX_MS = 8_000;
  *  while the operator is still looking at the last good frame. */
 const PICTURE_STALL_MS = 2_000;
 /** Three failures in a row stops being a slow drone and starts being a setup
- *  problem, which is what the socket probes answer. */
-const PROBE_AFTER_FAILURES = 3;
+ * problem, which is what the transport probes answer. */
 
+const PROBE_AFTER_FAILURES = 3;
 /**
  * The one failure retrying cannot fix. `ensure_stream_flowing` gives up with
  * this wording after `command` succeeded and three `streamoff`/`streamon`
@@ -632,33 +632,12 @@ const PROBE_AFTER_FAILURES = 3;
  */
 const WEDGED = /power-cycle the Tello/;
 
-/** How often the node's adapter is re-checked while offline. It is a route
- *  lookup, not a packet, but there is no reason to ask at the shell's 4 Hz. */
+/** How often USB device presence is re-checked while offline. */
 const NODE_POLL_MS = 1_000;
 
-/**
- * The failure, in the terms of the thing an operator has to go and touch. The
- * node's two down states get two different sentences: that distinction is the
- * whole reason `node_link` is three-valued.
- *
- * `link-down` names a specific wedge, and the sentence has been rewritten three
- * times because the remedy kept turning out to be wrong. The full ladder is in
- * the README; measured against a live wedge, ALL of these failed:
- * `Restart-NetAdapter`, a 3 s and a 12 s USB detach, a device reflash, a
- * changed MAC, a different physical port, `Disable`/`Enable-PnpDevice`, and
- * `pnputil /remove-device` on the NCM function itself.
- *
- * What works, verified: removing the composite **parent** node, which is the
- * only action that makes PnP build a new adapter instance rather than rebinding
- * the poisoned one. The wedge lives in that instance - a rebuilt adapter came up
- * `Up / Connected / 12 Mbps` on the spot, with no reboot. `nic-rebuild.ps1`
- * climbs the whole ladder and ends there, so the sentence can name one thing.
- */
+/** The failure, in terms of the thing an operator has to touch. */
 function diagnose(why: string): string {
-  if (nodeLinkState === "absent") return "노드가 연결되어 있지 않습니다 · USB 케이블을 확인하세요";
-  if (nodeLinkState === "link-down") {
-    return "노드 링크가 끊겼습니다 · desktop\\nic-rebuild.ps1 을 실행하세요 (재부팅 불필요)";
-  }
+  if (nodeLinkState === "absent") return "USB 벌크 노드를 열 수 없습니다 · USB 케이블을 확인하세요";
   if (WEDGED.test(why)) return "드론이 응답하지만 영상을 보내지 않습니다 · 드론 전원을 껐다 켜세요";
   return why;
 }
@@ -671,9 +650,9 @@ let retryAt = 0;
  *  state, and the reason this needs no timer of its own. */
 let lastPainted = 0;
 let lastPaintedAt = 0;
-/** The node's adapter, as Rust last reported it. Polled while there is no
- *  picture; while online it is provably `ready`, because the picture is coming
- *  through it. */
+/** The USB bulk node, as Rust last reported it. Polled while there is no
+ * picture; while online it is provably `ready`, because the picture is coming
+ * through it. */
 let nodeLinkState: NodeLink = "absent";
 let nodeCheckedAt = 0;
 /** True only when the drone has actually answered this session. Never `false`
@@ -774,9 +753,8 @@ async function attempt(): Promise<void> {
       renderer = null;
       vision.setSessionLive(false);
     }
-    // Which of the two failed, asked rather than guessed: the node is an
-    // adapter this host either holds a usable address on or does not, and only
-    // if it does can "the drone did not answer" mean anything.
+    // Ask Rust rather than guess. Without an accessible USB bulk device, a
+    // missing Tello reply cannot identify the drone as the failing peer.
     nodeLinkState = await nodeLink().catch<NodeLink>(() => "absent");
     droneUp = false;
     setPhase("offline", diagnose(why));
@@ -787,17 +765,16 @@ async function attempt(): Promise<void> {
     const wait = WEDGED.test(why) ? RETRY_MAX_MS : Math.min(RETRY_MIN_MS * 2 ** (failures - 1), RETRY_MAX_MS);
     retryAt = performance.now() + wait;
     // Awaited here, inside the `busy` hold, so the supervisor cannot start the
-    // next attempt while preflight has the three sockets open.
-    if (failures === PROBE_AFTER_FAILURES && nodeLinkState === "ready") await probeSockets();
+    // next attempt while preflight holds the USB bulk transport.
+    if (failures === PROBE_AFTER_FAILURES && nodeLinkState === "ready") await probeTransport();
   } finally {
     busy = false;
   }
 }
 
-/** Only ever called with `busy` held and no session: `preflight` binds the
- *  same three sockets a live link owns and would otherwise report AddrInUse
- *  against ourselves. */
-async function probeSockets(): Promise<void> {
+/** Only ever called with `busy` held and no session: `preflight` exercises the
+ * same USB bulk routes a live link owns. */
+async function probeTransport(): Promise<void> {
   if (renderer !== null) return;
   try {
     for (const p of await preflight()) {
@@ -813,12 +790,10 @@ async function probeSockets(): Promise<void> {
  * keep in step with the repaint that renders its decisions.
  */
 function superviseLink(): void {
-  // The node chip moves whether or not an attempt is in flight. While online
-  // the picture proves the node, and during a failed attempt - which can take
-  // seconds against a dead drone - a stale reading here is the difference
-  // between "check the cable" and "power-cycle the drone".
-  if (phase !== "online") pollNode();
+  // A readiness probe opens the vendor interface, so it cannot race the session
+  // handshake that owns the same exclusive WinUSB/usbfs claim.
   if (busy || updateApplying) return;
+  if (phase !== "online") pollNode();
   if (phase === "online") {
     if (renderer === null) {
       setPhase("offline", "렌더러 없음");
@@ -846,17 +821,15 @@ function superviseLink(): void {
 }
 
 /** Rate-limited, and never while a session is up: the picture is the proof
- *  then, and the adapter list would just be work nobody reads. */
+ * then, and re-enumerating USB devices would just be work nobody reads. */
 function pollNode(): void {
   const now = performance.now();
   if (now - nodeCheckedAt < NODE_POLL_MS) return;
   nodeCheckedAt = now;
   void nodeLink()
     .then((next) => {
-      // A node that has just become usable makes the current backoff pointless:
-      // it was counting down against a host with no link at all. `link-down`
-      // does NOT collapse it - the adapter is there and still cannot carry a
-      // packet, so retrying sooner would only fail sooner.
+      // A USB node that just became accessible makes the current backoff
+      // pointless: it was counting down before the transport existed.
       if (next === "ready" && nodeLinkState !== "ready") retryAt = Math.min(retryAt, performance.now());
       nodeLinkState = next;
     })
@@ -944,8 +917,6 @@ setInterval(() => {
     live: videoLive,
     link: linkView(),
     rttMs: stats?.latencyP50Ms ?? null,
-    bat: fresh?.bat ?? null,
-    flightS: fresh?.time ?? null,
     status,
     rxPktsPerSec,
     mbps: lastTelemetry?.mbps ?? null,

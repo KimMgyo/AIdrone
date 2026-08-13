@@ -1,0 +1,2 @@
+# Permit the active desktop user to open the AIdrone USB bulk interface.
+SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="8ad2", TAG+="uaccess"

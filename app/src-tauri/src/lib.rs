@@ -2,10 +2,11 @@
 //
 // Rust owns every byte of the drone link; the webview only decodes and paints.
 // The stream payload crossing into JS is a finished Annex-B frame. Native
-// perception runs beside the UDP receiver and reports only small geometry
+// perception runs beside USB bulk ingress and reports only small geometry
 // events; it cannot issue a flight command.
 
 mod apriltag3;
+mod bulk;
 mod copilot;
 mod h264;
 mod link;
@@ -17,47 +18,20 @@ mod update;
 mod video;
 mod vision;
 
-use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use parking_lot::Mutex;
 use serde_json::json;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::path::BaseDirectory;
 use tauri::Manager;
 
-/// Pinned by the cable, never discovered: the ESP32 soft-AP answers on `.1`,
-/// the Tello holds `.2` from that AP's lease, and `desktop/nic-setup.ps1`
-/// statics this host to `.50/24`. Nothing serves DHCP on the host side.
-const DEVICE_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 4, 1);
-const TELLO_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(192, 168, 4, 2), 8889);
-const VIDEO_PORT: u16 = 11111;
-const STATE_PORT: u16 = 8890;
-
-/// A test affordance, not configuration. `AIDRONE_TELLO_ADDR=127.0.0.1:8899`
-/// and `AIDRONE_DEVICE_IP=127.0.0.1` point the whole link at
-/// `desktop/fake-tello.ts`, so the app runs with no drone and no cable, which
-/// is most of what a measurement needs.
-///
-/// Its limit is worth knowing: the simulator's stream is encoded with x264
-/// `-tune zerolatency`, so it carries a VUI `max_num_reorder_frames` the real
-/// Tello omits, and it therefore could never reproduce the 502 ms DPB stall
-/// that dominated every real flight (README, *Solved: the 502 ms reading was
-/// the decoder's DPB*). A green run here is not a green run on the drone.
-///
-/// A malformed value falls back to the pinned address rather than failing
-/// the connect.
-fn from_env<T: std::str::FromStr>(key: &str, pinned: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(pinned)
-}
+const STATE_PORT: u16 = bulk::STATE_PORT;
+const VIDEO_PORT: u16 = bulk::VIDEO_PORT;
 
 /// The official ONNX Runtime 1.28.0 CPU binaries are deliberately loaded at
 /// runtime. Unlike the static binary downloaded by `ort`, their Linux build
@@ -136,26 +110,18 @@ fn command_timeout(cmd: &str) -> Duration {
 
 struct Session {
     video: Arc<video::VideoReceiver>,
-    /// Stopped by its own Drop. Unlike `video` nothing else holds a handle on
-    /// it, so field drop order is the whole teardown.
-    _state: state::StateReceiver,
+    _state: Arc<state::StateReceiver>,
+    /// Must drop before `bulk`: it sends the final streamoff using this worker.
     tello: Arc<tello::Tello>,
+    _bulk: Arc<bulk::BulkTransport>,
     _link: link::LinkMonitor,
-    /// Kept after `video` so the UDP source stops before the perception worker
-    /// is joined during teardown.
     vision: Arc<vision::VisionWorker>,
     telemetry_stop: Arc<AtomicBool>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // The other four own their own teardown; only the stats pump has no
-        // handle of its own to stop it.
         self.telemetry_stop.store(true, Ordering::Relaxed);
-        // That pump holds its own Arc on the receiver, so leaving the socket
-        // to Arc drop order would keep udp/11111 bound for up to a full tick
-        // after disconnect - long enough for a prompt reconnect to fail with
-        // AddrInUse. stop() joins the receive thread, so do it here.
         self.video.stop();
     }
 }
@@ -246,68 +212,44 @@ fn build_session(
     vision_events: Channel<serde_json::Value>,
     model_path: Option<PathBuf>,
 ) -> Result<Session, String> {
-    // Bind the video socket BEFORE the handshake: `streamon` is acked in
-    // milliseconds and datagrams follow immediately, so a receiver started
-    // afterwards loses the head of the stream - and with it the SPS/PPS the
-    // decoder cannot start without.
-    // This thread owns decoding and all detector state. It incrementally
-    // records decoder bootstrap data from every transport batch, while only
-    // emitting complete access units after a non-key mode is selected.
     let vision = Arc::new(vision::VisionWorker::start(vision_events, model_path));
     let vision_sink = Arc::clone(&vision);
-    let video = Arc::new(
-        video::VideoReceiver::start(VIDEO_PORT, move |f: video::Frame| {
-            // The WebView receives the original transport batch. Native
-            // perception reframes the same bytes internally before it queues
-            // a complete access unit, so neither path depends on UDP packet
-            // boundaries.
-            let video::Frame {
-                data,
-                recv_epoch_us,
-            } = f;
-            vision_sink.submit(&data, recv_epoch_us);
-            let mut buf = Vec::with_capacity(STAMP_LEN + data.len());
-            buf.extend_from_slice(&recv_epoch_us.to_le_bytes());
-            buf.extend_from_slice(&data);
-            // Raw, not Serialize: a Vec<u8> going out as a Serialize payload
-            // is JSON-encoded into an array of integers, turning each 5.6 KB
-            // frame into ~30 KB of text for the webview to parse.
-            let _ = frames.send(InvokeResponseBody::Raw(buf));
-        })
-        .map_err(|e| format!("bind udp/{VIDEO_PORT}: {e}"))?,
-    );
+    let video = Arc::new(video::VideoReceiver::start(move |f: video::Frame| {
+        let video::Frame { data, recv_epoch_us } = f;
+        vision_sink.submit(&data, recv_epoch_us);
+        let mut buf = Vec::with_capacity(STAMP_LEN + data.len());
+        buf.extend_from_slice(&recv_epoch_us.to_le_bytes());
+        buf.extend_from_slice(&data);
+        let _ = frames.send(InvokeResponseBody::Raw(buf));
+    }));
+    let state_rx = Arc::new(state::StateReceiver::start(move |value| {
+        let _ = drone.send(value);
+    }));
 
-    // Bound before the handshake for the same reason as video, and a tighter
-    // one: `command` is acked in milliseconds and the first state datagrams
-    // follow it immediately, so a receiver started after the handshake misses
-    // the burst that tells the panel a drone is there at all.
-    let state_rx = state::StateReceiver::start(STATE_PORT, move |v| {
-        // Serialize, not Raw: a state object is ~16 small numbers ten times a
-        // second, which is nothing next to the video channel beside it.
-        let _ = drone.send(v);
-    })
-    .map_err(|e| format!("bind udp/{STATE_PORT}: {e}"))?;
-
-    let tello = Arc::new(
-        tello::Tello::connect(from_env("AIDRONE_TELLO_ADDR", TELLO_ADDR))
-            .map_err(|e| format!("bind udp/8889: {e}"))?,
+    let inbound_video = Arc::clone(&video);
+    let inbound_state = Arc::clone(&state_rx);
+    let bulk = Arc::new(
+        bulk::BulkTransport::connect(Arc::new(move |record| match record.udp_port {
+            STATE_PORT => inbound_state.ingest_datagram(&record.payload),
+            VIDEO_PORT => inbound_video.ingest_datagram(&record.payload),
+            bulk::BENCH_PORT => {}
+            _ => {}
+        }))
+        .map_err(|error| format!("USB bulk open: {error}"))?,
     );
+    let tello = Arc::new(tello::Tello::connect(Arc::clone(&bulk)));
     tello
         .start_stream()
-        .map_err(|e| format!("stream handshake: {e}"))?;
+        .map_err(|error| format!("stream handshake: {error}"))?;
     ensure_stream_flowing(&tello, &video.frame_counter())?;
     tello.set_keepalive(true);
 
-    let link = link::LinkMonitor::start(
-        from_env("AIDRONE_DEVICE_IP", DEVICE_IP),
-        video.frame_counter(),
-        move |e| {
-            if let Ok(v) = serde_json::to_value(e) {
-                let _ = link_events.send(v);
-            }
-        },
-    )
-    .map_err(|e| format!("heartbeat socket: {e}"))?;
+    let link = link::LinkMonitor::start(video.frame_counter(), move |event| {
+        if let Ok(value) = serde_json::to_value(event) {
+            let _ = link_events.send(value);
+        }
+    })
+    .map_err(|error| format!("video link watcher: {error}"))?;
 
     let telemetry_stop = Arc::new(AtomicBool::new(false));
     spawn_telemetry(video.clone(), telemetry, telemetry_stop.clone());
@@ -315,9 +257,10 @@ fn build_session(
     Ok(Session {
         video,
         _state: state_rx,
-        vision,
         tello,
+        _bulk: bulk,
         _link: link,
+        vision,
         telemetry_stop,
     })
 }
@@ -376,29 +319,26 @@ async fn connect(
     // page renders its Disconnect button dead because it owns no renderer.
     // A connect from the only window therefore means any prior session is
     // stale by definition -- retire it instead of rejecting.
-    let stale = slot.lock().expect("session lock").take();
+    let stale = slot.lock().take();
     // The handshake blocks ~1.4 s by design - `streamoff` has to land between
     // `command` and `streamon`, with real waits either side. Off the main
     // thread, or the window is frozen for the whole of it. Dropping the stale
-    // session is blocking too (it sends `streamoff` and joins three threads),
-    // and it shares the same task so it completes before the new session
-    // binds - otherwise udp/8889 and udp/11111 are still held and the bind
-    // fails with AddrInUse.
+    // session also joins the USB worker before the next one claims interface 0.
     let session = tauri::async_runtime::spawn_blocking(move || {
         drop(stale);
         build_session(frames, telemetry, link, drone, vision, model_path)
     })
     .await
     .map_err(|e| format!("connect task: {e}"))??;
-    *slot.lock().expect("session lock") = Some(session);
+    *slot.lock() = Some(session);
     Ok(())
 }
 
 #[tauri::command]
 async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let taken = state.session.lock().expect("session lock").take();
-    // Dropping the session sends `streamoff` and joins three threads. Also
-    // blocking work, also not the main thread's problem.
+    let taken = state.session.lock().take();
+    // Dropping the session sends `streamoff` through USB bulk and joins the
+    // link workers off the Tauri runtime.
     tauri::async_runtime::spawn_blocking(move || drop(taken))
         .await
         .map_err(|e| format!("disconnect task: {e}"))
@@ -407,7 +347,7 @@ async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn send_command(state: tauri::State<'_, AppState>, cmd: String) -> Result<String, String> {
     let tello = {
-        let guard = state.session.lock().expect("session lock");
+        let guard = state.session.lock();
         guard
             .as_ref()
             .map(|s| s.tello.clone())
@@ -421,14 +361,13 @@ async fn send_command(state: tauri::State<'_, AppState>, cmd: String) -> Result<
     .map_err(|e| format!("command task: {e}"))?
 }
 
-/// Stick control. Deliberately not `spawn_blocking`, unlike every other
-/// command here: `send_now` is one non-blocking datagram write with no reply
-/// to wait for, and at the 10 Hz a live stick runs at, a thread hop per update
-/// would cost more than the send it wraps.
+/// Stick control bypasses `spawn_blocking`: `send_now` only enqueues one USB
+/// bulk record and does not wait for a reply, which keeps the 10 Hz control
+/// path off the runtime's blocking pool.
 #[tauri::command]
 async fn send_rc(state: tauri::State<'_, AppState>, cmd: String) -> Result<(), String> {
     let tello = {
-        let guard = state.session.lock().expect("session lock");
+        let guard = state.session.lock();
         guard
             .as_ref()
             .map(|s| s.tello.clone())
@@ -445,7 +384,6 @@ fn set_vision_mode(state: tauri::State<'_, AppState>, mode: String) -> Result<()
     let worker = state
         .session
         .lock()
-        .expect("session lock")
         .as_ref()
         .map(|session| Arc::clone(&session.vision))
         .ok_or_else(|| "not connected".to_string())?;
@@ -453,241 +391,88 @@ fn set_vision_mode(state: tauri::State<'_, AppState>, mode: String) -> Result<()
     Ok(())
 }
 
-/// Where this build's bytes actually come from, resolved through the same
-/// `from_env` overrides `build_session` reads. Reporting the pinned constants
-/// instead would have the panel confidently name 192.168.4.2 through a whole
-/// simulator run - the one case where showing the addresses is worth anything.
+/// The existing frontend shape is retained, but all endpoints now identify the
+/// one USB vendor interface rather than invented host-side addresses.
 #[tauri::command]
 fn endpoints() -> serde_json::Value {
     json!({
-        "node": from_env("AIDRONE_DEVICE_IP", DEVICE_IP).to_string(),
-        "tello": from_env("AIDRONE_TELLO_ADDR", TELLO_ADDR).to_string(),
-        "state": format!("0.0.0.0:{STATE_PORT}"),
-        "video": format!("0.0.0.0:{VIDEO_PORT}"),
+        "node": "USB VID:303A PID:8AD2 IF:0",
+        "tello": "bulk OUT -> UDP/8889",
+        "state": "bulk IN <- UDP/8890",
+        "video": "bulk IN <- UDP/11111",
     })
 }
 
-/// The state of the node's network link on this host - which is a different
-/// question from whether the drone answers, and the panel reports the two
-/// separately because the fixes are different.
-///
-/// Three answers, because there are three situations and the remedy differs in
-/// each. Two of them used to be collapsed into one, and that cost a bench
-/// session: a node sitting plugged in was reported as `absent`, which sent the
-/// operator to check a cable that was already in.
-///
-/// - `"ready"` - an address on the node's `/24` exists and can be bound. This
-///   is the only state in which the node can be talked to.
-/// - `"link-down"` - the address is configured on an adapter but cannot be
-///   used. On Windows a media-disconnected adapter keeps its static address in
-///   `Tentative` state, so it is listed and unbindable at the same time. The
-///   device is present; the link it should be presenting is not up.
-/// - `"absent"` - no adapter carries the node's `/24` at all.
-///
-/// **Every cheaper method was measured and rejected.** A connected UDP socket
-/// cannot see any of this: with no route to `192.168.4.0/24`, `connect()`
-/// succeeds and `send()` reports every byte written, because the datagram
-/// leaves by the default route and dies out there. Asking for the SOURCE
-/// address `connect()` resolved works on Linux and is wrong on Windows, which
-/// returns the default interface's address regardless - that shipped, and read
-/// as a missing node while the hardware was working. `bind` alone is correct
-/// about usability on both platforms but cannot separate the last two states:
-/// an absent adapter and a `Tentative` address both give `AddrNotAvailable`.
-///
-/// So the adapter list answers "is it configured" and `bind` answers "can it be
-/// used". `if-addrs` was tried first and drops `Tentative` addresses, which is
-/// exactly the case that matters here; `network-interface` reports them.
-///
-/// Costs no packet and no sweep: only addresses actually on the node's `/24`
-/// are bound, so the miss case does no work at all.
 #[tauri::command]
 fn node_link() -> &'static str {
-    let [a, b, c, _] = from_env("AIDRONE_DEVICE_IP", DEVICE_IP).octets();
-    let Ok(interfaces) = NetworkInterface::show() else {
-        return "absent";
-    };
-    let mut configured = false;
-    for address in interfaces.iter().flat_map(|i| i.addr.iter()) {
-        let IpAddr::V4(v4) = address.ip() else { continue };
-        if v4.octets()[..3] != [a, b, c] {
-            continue;
-        }
-        configured = true;
-        if UdpSocket::bind(SocketAddrV4::new(v4, 0)).is_ok() {
-            return "ready";
-        }
-    }
-    if configured {
-        "link-down"
+    if bulk::BulkTransport::device_ready() {
+        "ready"
     } else {
         "absent"
     }
 }
 
 /// The 250 payload codes of the marker dictionary, for the panel's 6x6 drawing
-/// pad and its roster glyphs. Read-only and constant for the life of the build,
-/// so the frontend asks once at boot; 36 bits each fits a JSON number exactly.
+/// pad and its roster glyphs.
 #[tauri::command]
 fn marker_codes() -> Result<Vec<u64>, String> {
     crate::apriltag3::payload_codes()
 }
 
-/// How long one probe waits for its answer. A healthy Tello acks `command` in
-/// a few ms and state follows within one 10 Hz period, so this is slack for a
-/// link that is merely slow - and short enough that all three probes are done
-/// inside three seconds, which is as long as anyone will watch a spinner.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1_200);
 
 #[tauri::command]
 async fn preflight(state: tauri::State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
-    // A live session already owns 8889, 8890 and 11111. Probing anyway would
-    // report AddrInUse against ourselves on every line, and read as a dead
-    // link at the exact moment the link is provably up.
-    //
-    // Bound to a `let` rather than tested inline so the guard is provably
-    // dropped at the end of this statement: a MutexGuard is !Send, and one
-    // still alive at the await below would make the whole command's future
-    // !Send and fail to compile.
-    let live = state.session.lock().expect("session lock").is_some();
+    let live = state.session.lock().is_some();
     if live {
-        return Ok(vec![probe(
-            "session",
-            "세션 실행 중",
-            "포트 점유 중 - 연결 해제 후 재점검",
-            false,
-        )]);
+        return Ok(vec![probe("session", "세션 실행 중", "USB bulk 세션이 활성 상태", true)]);
     }
-    // Up to ~2.4 s of blocking listens. Not the main thread's problem.
     tauri::async_runtime::spawn_blocking(run_preflight)
         .await
-        .map_err(|e| format!("preflight task: {e}"))
+        .map_err(|error| format!("preflight task: {error}"))
 }
 
 fn probe(id: &str, label: &str, detail: &str, ok: bool) -> serde_json::Value {
     json!({ "id": id, "label": label, "detail": detail, "ok": ok })
 }
 
-/// Sequential, and the order carries meaning: probe 1's `command` is what
-/// makes a live drone start broadcasting, so probe 2 has something to hear
-/// without sending anything of its own. Each probe owns its socket for exactly
-/// its own duration, because the connect that follows a green preflight binds
-/// these same three ports and a probe still holding one would fail the run it
-/// just blessed.
 fn run_preflight() -> Vec<serde_json::Value> {
-    let peer = from_env("AIDRONE_TELLO_ADDR", TELLO_ADDR);
-    vec![probe_command(peer), probe_state(), probe_video()]
-}
-
-/// One receive, retried until `timeout` runs out. The retry is there for
-/// Windows: WSAECONNRESET surfaces an earlier ICMP port-unreachable on the
-/// NEXT recv, and reading that as "nothing arrived" fails the preflight of a
-/// link that is perfectly healthy.
-fn recv_within(sock: &UdpSocket, timeout: Duration, buf: &mut [u8]) -> Option<usize> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        // A zero read timeout means "block forever" to the OS, so the deadline
-        // has to be tested before it is ever set.
-        if left.is_zero() || sock.set_read_timeout(Some(left)).is_err() {
-            return None;
+    let state_seen = Arc::new(AtomicBool::new(false));
+    let observed_state = Arc::clone(&state_seen);
+    let transport = match bulk::BulkTransport::connect(Arc::new(move |record| {
+        if record.udp_port == STATE_PORT {
+            observed_state.store(true, Ordering::Relaxed);
         }
-        match sock.recv_from(buf) {
-            Ok((n, _)) => return Some(n),
-            Err(e) if e.kind() == ErrorKind::ConnectionReset => continue,
-            Err(_) => return None,
-        }
-    }
-}
-
-/// The only end-to-end reachability proof available without starting a
-/// session: bind the command port, say `command`, and see whether anything
-/// answers. It doubles as proof that 8889 is free, which catches a second copy
-/// of this app here instead of seconds into a connect.
-fn probe_command(peer: SocketAddrV4) -> serde_json::Value {
-    const ID: &str = "command";
-    const LABEL: &str = "명령 응답";
-
-    let sock = match UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, tello::CMD_PORT)) {
-        Ok(s) => s,
-        Err(e) => {
-            let detail = format!("udp/{} 바인드 실패: {e}", tello::CMD_PORT);
-            return probe(ID, LABEL, &detail, false);
+    })) {
+        Ok(transport) => Arc::new(transport),
+        Err(error) => {
+            let detail = format!("USB VID:303A PID:8AD2 열기 실패: {error}");
+            return vec![
+                probe("command", "명령 응답", &detail, false),
+                probe("state", "상태 수신", "USB bulk 장치 없음", false),
+                probe("video", "영상 경로", "USB bulk 장치 없음", false),
+            ];
         }
     };
-    if let Err(e) = sock.send_to(b"command", peer) {
-        return probe(ID, LABEL, &format!("{peer} 전송 실패: {e}"), false);
-    }
-
-    let mut buf = [0u8; 256];
-    match recv_within(&sock, PROBE_TIMEOUT, &mut buf) {
-        // Verbatim, trimmed: `ok` and `error` are both answers, and which one
-        // came back is the whole content of this probe.
-        Some(n) => {
-            let reply = String::from_utf8_lossy(&buf[..n]);
-            probe(ID, LABEL, &format!("{peer} -> \"{}\"", reply.trim()), true)
-        }
-        None => probe(ID, LABEL, &format!("{peer} -> 응답 없음"), false),
-    }
-}
-
-/// Listens and sends nothing: probe 1 already sent the `command` that starts
-/// the broadcast. Silence here after a green probe 1 means the drone took the
-/// command and the state path is blocked somewhere between it and this host.
-fn probe_state() -> serde_json::Value {
-    const ID: &str = "state";
-    const LABEL: &str = "상태 수신";
-
-    let sock = match UdpSocket::bind(("0.0.0.0", STATE_PORT)) {
-        Ok(s) => s,
-        Err(e) => {
-            return probe(
-                ID,
-                LABEL,
-                &format!("udp/{STATE_PORT} 바인드 실패: {e}"),
-                false,
-            )
-        }
+    let tello = tello::Tello::connect(transport);
+    let command = match tello.send("command", PROBE_TIMEOUT) {
+        Ok(reply) => probe("command", "명령 응답", &format!("bulk UDP/8889 -> \"{reply}\""), true),
+        Err(error) => probe("command", "명령 응답", &format!("bulk UDP/8889 응답 없음: {error}"), false),
     };
-
-    let mut buf = [0u8; 2048];
-    match recv_within(&sock, PROBE_TIMEOUT, &mut buf) {
-        // Counted, not parsed: this proves a line arrived and roughly what
-        // shape it is. state.rs owns the parse, and duplicating it here would
-        // give the probe its own way to be wrong.
-        Some(n) => {
-            let line = String::from_utf8_lossy(&buf[..n]);
-            let fields = line.split(';').filter(|p| p.contains(':')).count();
-            probe(
-                ID,
-                LABEL,
-                &format!("udp/{STATE_PORT} <- {fields}개 필드"),
-                true,
-            )
-        }
-        None => probe(ID, LABEL, &format!("udp/{STATE_PORT} <- 수신 없음"), false),
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    while Instant::now() < deadline && !state_seen.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(25));
     }
-}
-
-/// Availability only. Video flows after `streamon`, which preflight will not
-/// send: it would leave the drone streaming at a socket about to be dropped -
-/// precisely the wedged state `ensure_stream_flowing` then spends seconds
-/// undoing. AddrInUse is the failure that matters here.
-fn probe_video() -> serde_json::Value {
-    const ID: &str = "video";
-    const LABEL: &str = "영상 포트";
-
-    match UdpSocket::bind(("0.0.0.0", VIDEO_PORT)) {
-        Ok(_) => {
-            let detail = format!("udp/{VIDEO_PORT} 사용 가능 (streamon 전에는 무신호)");
-            probe(ID, LABEL, &detail, true)
-        }
-        Err(e) => probe(
-            ID,
-            LABEL,
-            &format!("udp/{VIDEO_PORT} 사용 불가: {e}"),
-            false,
-        ),
-    }
+    let state = if state_seen.load(Ordering::Relaxed) {
+        probe("state", "상태 수신", "bulk IN <- UDP/8890", true)
+    } else {
+        probe("state", "상태 수신", "bulk IN <- UDP/8890 수신 없음", false)
+    };
+    vec![
+        command,
+        state,
+        probe("video", "영상 경로", "bulk IN <- UDP/11111 (streamon 전에는 무신호)", true),
+    ]
 }
 
 /// Decoder policy for the Linux WebView, published before WebKit forks its web
@@ -781,7 +566,6 @@ pub fn run() {
                     .state::<AppState>()
                     .session
                     .lock()
-                    .expect("session lock")
                     .take();
                 drop(taken);
             }

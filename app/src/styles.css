@@ -5,8 +5,8 @@
  * (`--color-accent` -> `bg-accent` / `text-accent` / `border-accent`). So the
  * palette lives in one place and the markup never carries a hex code.
  *
- * Fonts are bundled, not fetched. A ground station is used on a USB-NCM link
- * with no route to the internet, and a webfont that fails at launch changes
+ * Fonts are bundled, not fetched. A ground station uses a USB link with no
+ * route to the internet, and a webfont that fails at launch changes
  * every metric on screen at exactly the wrong moment. The KR faces are the
  * unicode-range-split builds, so the disk holds every chunk and the renderer
  * loads only the handful a screen actually needs.

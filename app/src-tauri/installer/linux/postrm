@@ -1,60 +1,34 @@
 #!/bin/sh
-# Undoes only unmodified link configuration placed outside the package list.
-#
-# A plain remove and an upgrade deliberately retain the configuration. On
-# purge, defaults we still own disappear; an administrator's changed subnet or
-# udev rule survives rather than being silently erased.
+# Removes only the unmodified USB permission rule on package purge.
 set -e
 
-RULES_DST=/etc/udev/rules.d/70-aidrone-ncm.rules
-CONN_DST=/etc/NetworkManager/system-connections/aidrone.nmconnection
+RULES_DST=/etc/udev/rules.d/70-aidrone-usb.rules
 STATE_DIR=/var/lib/aidrone/installer
-RULES_STATE=$STATE_DIR/70-aidrone-ncm.rules.sha256
-CONN_STATE=$STATE_DIR/aidrone.nmconnection.sha256
+RULES_STATE=$STATE_DIR/70-aidrone-usb.rules.sha256
 
 hash_file() {
   sha256sum "$1" | awk '{print $1}'
 }
 
 state_matches() {
-  state=$1
-  dst=$2
-  [ -f "$state" ] && [ -f "$dst" ] || return 1
-  IFS= read -r expected < "$state"
-  [ "$expected" = "$(hash_file "$dst")" ]
-}
-
-remove_managed() {
-  dst=$1
-  state=$2
-  label=$3
-
-  if [ ! -e "$dst" ]; then
-    rm -f "$state"
-    return 0
-  fi
-  if state_matches "$state" "$dst"; then
-    rm -f "$dst" "$state"
-    return 0
-  fi
-
-  echo "AIdrone: preserving locally modified $label on purge: $dst" >&2
-  rm -f "$state"
-  return 1
+  [ -f "$RULES_STATE" ] && [ -f "$RULES_DST" ] || return 1
+  IFS= read -r expected < "$RULES_STATE"
+  [ "$expected" = "$(hash_file "$RULES_DST")" ]
 }
 
 case "$1" in
   purge)
-    rules_removed=false
-    conn_removed=false
-    if remove_managed "$RULES_DST" "$RULES_STATE" 'udev rule'; then rules_removed=true; fi
-    if remove_managed "$CONN_DST" "$CONN_STATE" 'NetworkManager profile'; then conn_removed=true; fi
+    if [ ! -e "$RULES_DST" ]; then
+      rm -f "$RULES_STATE"
+    elif state_matches; then
+      rm -f "$RULES_DST" "$RULES_STATE"
+      udevadm control --reload-rules 2>/dev/null || true
+    else
+      echo "AIdrone: preserving locally modified USB udev rule on purge: $RULES_DST" >&2
+      rm -f "$RULES_STATE"
+    fi
     rmdir "$STATE_DIR" 2>/dev/null || true
-
-    [ "$rules_removed" = true ] && udevadm control --reload-rules 2>/dev/null || true
-    [ "$conn_removed" = true ] && nmcli connection reload 2>/dev/null || true
     ;;
 esac
-
 #DEBHELPER#
 exit 0

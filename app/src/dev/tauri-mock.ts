@@ -26,7 +26,7 @@
  *                   frames keep coming, so the supervisor must NOT reconnect
  *   ?stall=6        stop the frames this many seconds in, session still up -
  *                   the supervisor should notice and dial again
- *   ?nonode=1       the node's adapter is absent - NODE 없음, DRONE `--`
+ *   ?nonode=1       the USB bulk node is absent - NODE 없음, DRONE `--`
  *   ?wedged=1       the drone answers but never streams; the one failure that
  *                   needs hands on the aircraft
  *   ?bat=14         hold the battery here (colour thresholds are 30 / 15)
@@ -166,8 +166,8 @@ function startVideo(current: Session, units: Uint8Array[]): void {
   let bytes = 0;
   // The picture stopping mid-session is a first-class state now - it is what
   // the supervisor calls offline - so the mock has to be able to produce it.
-  // Frames stop; the socket, the state stream and the session all stay up,
-  // which is exactly the case a link-level silence check cannot see.
+  // Frames stop; the bulk stream, the state stream and the session all stay
+  // up, which is exactly the case a link-level silence check cannot see.
   const stallAt = number("stall", 0);
   const startedAt = performance.now();
 
@@ -285,10 +285,10 @@ function startVision(current: Session): void {
 
 const handlers: Record<string, Handler> = {
   endpoints: () => ({
-    tello: "192.168.4.2:8889",
-    state: "0.0.0.0:8890",
-    video: "0.0.0.0:11111",
-    node: "192.168.4.1",
+    tello: "USB bulk OUT -> UDP/8889",
+    state: "USB bulk IN <- UDP/8890",
+    video: "USB bulk IN <- UDP/11111",
+    node: "USB VID:303A PID:8AD2 IF:0",
   }),
 
   // Real MIP payload bits would need the 250-entry table in here; the library
@@ -306,22 +306,19 @@ const handlers: Record<string, Handler> = {
     }),
 
   preflight: () => [
-    { id: "command", label: "명령 소켓", detail: "udp/8889 · ok (mock)", ok: true },
-    { id: "state", label: "상태 스트림", detail: "udp/8890 · 10 Hz (mock)", ok: true },
-    { id: "video", label: "영상 포트", detail: "udp/11111 사용 가능 (mock)", ok: true },
+    { id: "command", label: "USB 벌크 명령", detail: "USB bulk OUT -> UDP/8889 · ok (mock)", ok: true },
+    { id: "state", label: "USB 벌크 상태", detail: "USB bulk IN <- UDP/8890 · 10 Hz (mock)", ok: true },
+    { id: "video", label: "USB 벌크 영상", detail: "USB bulk IN <- UDP/11111 · 사용 가능 (mock)", ok: true },
   ],
 
-  // The node is an adapter, so the mock answers the same question Rust does:
-  // what state is the link in. `?nonode=1` takes it away entirely and
-  // `?linkdown=1` is the harder one - present, configured, and unusable - which
-  // is the state that must NOT read as a missing cable. Both leave the drone
-  // cell reading `--` rather than claiming silence.
-  node_link: () => (flag("nonode") ? "absent" : flag("linkdown") ? "link-down" : "ready"),
+  // `?nonode=1` models a disconnected or inaccessible USB bulk device. The
+  // drone cell remains `--` rather than claiming transport silence.
+  node_link: () => (flag("nonode") ? "absent" : "ready"),
 
   connect: (args) => {
     // The one failure retrying cannot fix, in the wording `lib.rs` emits.
     if (flag("wedged")) throw new Error("no video after three streamon attempts - power-cycle the Tello");
-    if (flag("nonode") || flag("linkdown")) throw new Error('tello: no reply to "command"');
+    if (flag("nonode")) throw new Error("USB bulk node is not accessible");
     stopSession();
     const current: Session = {
       frames: args.frames,
