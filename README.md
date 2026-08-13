@@ -1229,6 +1229,29 @@ pipe, and it will presumably do it again - it happened ~15 s into a live
 streaming session, not at plug time, so replugging is not the trigger. What has
 changed is the cost: one script, about 40 s, no reboot, and the hatch names it.
 
+#### The control that settles it: the device is not at fault
+
+`relink` was run again with the link **healthy**, over the CH343 UART console so
+nothing about the measurement touched the native cable:
+
+```
+[ncm] relink: sent (total 1)
+[2s] usb=up ... rx=9  stall=0 recov=0/0 relink=1
+```
+
+Sent, not refused - and `rx` climbing shows the host putting its own frames on
+the wire. So the notification endpoint claims, transfers and completes normally
+whenever Windows is polling it. The `endpoint busy` seen during a wedge is not a
+stuck FIFO, a bad endpoint allocation or a descriptor problem: it is TinyUSB's
+transfer still sitting there because **`usbncm.sys` stopped issuing IN tokens on
+a pipe it had been polling a moment earlier.**
+
+That is a Microsoft driver defect, inside a binary this project cannot patch.
+The only way to remove the cause rather than the symptom is to stop depending on
+that driver - and the shipped TinyUSB has `CONFIG_TINYUSB_VENDOR_ENABLED 1`, so
+a vendor bulk interface bound to WinUSB by MS OS 2.0 descriptors is reachable
+without rebuilding the framework.
+
 #### The node's own status LED
 
 The DevKitC's single WS2812 on GPIO48 now carries the one fact an operator
