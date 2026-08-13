@@ -315,6 +315,10 @@ const handlers: Record<string, Handler> = {
   // drone cell remains `--` rather than claiming transport silence.
   node_link: () => (flag("nonode") ? "absent" : "ready"),
 
+  // The browser has no binary to ask, and a real-looking number here would be
+  // a lie the moment the crate's version moves. `dev` says which it is.
+  app_version: () => "dev",
+
   connect: (args) => {
     // The one failure retrying cannot fix, in the wording `lib.rs` emits.
     if (flag("wedged")) throw new Error("no video after three streamon attempts - power-cycle the Tello");

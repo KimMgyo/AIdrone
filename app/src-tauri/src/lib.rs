@@ -412,6 +412,14 @@ fn node_link() -> &'static str {
     }
 }
 
+/// The build's own version, so the status bar shows the exact string the
+/// updater compares against - not a copy in `package.json` that is free to
+/// drift from the one the release artifacts are named after.
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// The 250 payload codes of the marker dictionary, for the panel's 6x6 drawing
 /// pad and its roster glyphs.
 #[tauri::command]
@@ -541,6 +549,7 @@ pub fn run() {
             set_vision_mode,
             endpoints,
             node_link,
+            app_version,
             marker_codes,
             preflight,
             copilot::copilot_turn,

@@ -97,6 +97,9 @@ export interface Station {
     timeline: HTMLElement;
   };
   update(m: StationModel): void;
+  /** One-shot, not part of the model: the build cannot change while it runs, so
+   *  it is written once when Rust answers rather than on every shell tick. */
+  setVersion(version: string): void;
   setMode(mode: ControlMode): void;
   toggleLeft(): void;
   toggleBottom(): void;
@@ -308,6 +311,10 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       <div class="flex-none"><span data-k="fps">--</span> fps</div>
       <div class="flex-none">DROP <span data-k="drop">--</span></div>
       <div data-k="link" class="flex-none text-dim2">LINK IDLE</div>
+      <!-- Last, past every reading that moves: the build number is the one
+           thing in this strip that cannot change while the app runs, and it is
+           what an operator reads out when asking whether an update landed. -->
+      <div data-k="version" class="flex-none text-dim3">v--</div>
     </div>
   `;
 
@@ -355,6 +362,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     dec: q("dec", HTMLSpanElement),
     drop: q("drop", HTMLSpanElement),
     link: q("link", HTMLDivElement),
+    version: q("version", HTMLDivElement),
     glLeft: q("gl-left", HTMLDivElement),
     glBottom: q("gl-bottom", HTMLDivElement),
   };
@@ -499,6 +507,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       cell.link.className = !m.live ? "text-dim2" : m.linkOk ? "text-ok" : "text-alert";
     },
 
+    setVersion: (version) => text(cell.version, `v${version}`),
     setMode,
     toggleLeft: () => setLeft(!leftOpen),
     toggleBottom: () => setBottom(!bottomOpen),

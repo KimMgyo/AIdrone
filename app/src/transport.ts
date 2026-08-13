@@ -692,6 +692,13 @@ export async function nodeLink(): Promise<NodeLink> {
   return await invoke<NodeLink>("node_link");
 }
 
+/** This build's version, straight off the binary. Asked of Rust rather than
+ *  read from `package.json` so the number on screen is the same one the updater
+ *  compares and the release artifacts are named after. */
+export async function appVersion(): Promise<string> {
+  return await invoke<string>("app_version");
+}
+
 /** Probes the USB bulk routes and drone. Takes ~2 s and cannot run while a
  * session holds the transport. */
 export async function preflight(): Promise<Probe[]> {

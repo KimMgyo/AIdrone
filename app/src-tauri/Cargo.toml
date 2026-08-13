@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.17"
+version = "0.1.18"
 description = "Tello viewer over the ESP32 USB vendor-bulk link - Rust owns the drone link, WebCodecs owns decode"
 authors = ["you"]
 edition = "2021"

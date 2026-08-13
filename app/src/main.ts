@@ -53,6 +53,7 @@ import { installTimeline } from "./panels/timeline.ts";
 import { VideoRenderer } from "./render.ts";
 import { installStation, type LinkView, type StationModel } from "./screens/station.ts";
 import {
+  appVersion,
   connect,
   disconnect,
   endpoints,
@@ -137,6 +138,11 @@ const station = installStation(stationRoot, {
   onTakeoff: () => flightCommand("takeoff"),
   onLand: () => flightCommand("land"),
 });
+// Asked once and never again. A build that cannot report its own version is not
+// a reason to hold up the shell, so the cell simply keeps its placeholder.
+void appVersion()
+  .then((version) => station.setVersion(version))
+  .catch(() => {});
 
 // --- panels ----------------------------------------------------------------
 

@@ -48,6 +48,11 @@ struct GhAsset {
 struct GhRelease {
     #[serde(default)]
     tag_name: String,
+    /// RFC-3339, which GitHub emits zero-padded and UTC, so a plain string
+    /// compare orders these correctly without pulling in a date parser. Absent
+    /// on a draft, and a release with no publish time loses every tie.
+    #[serde(default)]
+    published_at: Option<String>,
     #[serde(default)]
     assets: Vec<GhAsset>,
 }
@@ -133,20 +138,27 @@ fn asset_for_platform<'a>(assets: &'a [GhAsset], linux_suffix: Option<&str>) -> 
     assets.iter().find(|asset| asset.name.ends_with(&wanted))
 }
 
-/// The highest version any release offers for this platform, or None when this
-/// build is already it.
+/// The newest release offering the highest version for this platform, or None
+/// when this build is already it.
 ///
 /// Deliberately a maximum rather than "the first one": `GET /releases` does not
 /// come back newest-first. Measured against this repository, page one arrived
 /// as 0.1.2, 0.1.11, 0.1.8 - ordered by tag name, which here is a commit SHA
 /// and therefore arbitrary. Taking the first newer entry found an old build and
 /// missed the current one entirely.
+///
+/// Version alone is not enough to identify a build here, which is why ties fall
+/// back to publish time. Every commit publishes a prerelease tagged
+/// `build-<sha>` while the version in `Cargo.toml` only moves when someone moves
+/// it, so the same version routinely ships from several releases - and with an
+/// arbitrary release order, "the first one at the highest version" is a coin
+/// flip between a build from this morning and the one that just finished.
 fn pick(
     releases: &[GhRelease],
     current: &str,
     linux_suffix: Option<&str>,
 ) -> Option<AvailableUpdate> {
-    let mut best: Option<AvailableUpdate> = None;
+    let mut best: Option<(AvailableUpdate, &str)> = None;
     for release in releases {
         let Some(asset) = asset_for_platform(&release.assets, linux_suffix) else {
             continue;
@@ -154,6 +166,9 @@ fn pick(
         let Some(version) = version_of(&asset.name) else {
             continue;
         };
+        // Against the installed build this stays strictly newer: offering the
+        // version already running would re-download and re-install it on every
+        // launch, forever.
         if !is_newer(&version, current) {
             continue;
         }
@@ -161,22 +176,26 @@ fn pick(
             // Refuse what cannot be checked rather than install it blind.
             continue;
         };
-        if best
-            .as_ref()
-            .is_some_and(|found| !is_newer(&version, &found.version))
-        {
+        let published = release.published_at.as_deref().unwrap_or("");
+        if best.as_ref().is_some_and(|(found, found_published)| {
+            !is_newer(&version, &found.version)
+                && (is_newer(&found.version, &version) || published <= *found_published)
+        }) {
             continue;
         }
-        best = Some(AvailableUpdate {
-            version,
-            tag: release.tag_name.clone(),
-            asset: asset.name.clone(),
-            url: asset.browser_download_url.clone(),
-            digest: digest.to_ascii_lowercase(),
-            size: asset.size,
-        });
+        best = Some((
+            AvailableUpdate {
+                version,
+                tag: release.tag_name.clone(),
+                asset: asset.name.clone(),
+                url: asset.browser_download_url.clone(),
+                digest: digest.to_ascii_lowercase(),
+                size: asset.size,
+            },
+            published,
+        ));
     }
-    best
+    best.map(|(update, _)| update)
 }
 
 #[cfg(target_os = "linux")]
@@ -548,8 +567,13 @@ mod tests {
     }
 
     fn release(names: &[&str]) -> GhRelease {
+        published_release("build-abc", "2026-01-01T00:00:00Z", names)
+    }
+
+    fn published_release(tag: &str, published_at: &str, names: &[&str]) -> GhRelease {
         GhRelease {
-            tag_name: "build-abc".to_owned(),
+            tag_name: tag.to_owned(),
+            published_at: Some(published_at.to_owned()),
             assets: names
                 .iter()
                 .map(|name| asset(name, Some("sha256:AA")))
@@ -658,6 +682,51 @@ mod tests {
             Some("0.1.13".to_owned())
         );
         assert!(pick(&shuffled, "0.1.13", suffix).is_none());
+    }
+
+    /// Every commit publishes a prerelease while the version only moves when
+    /// someone moves it, so several releases routinely carry the same one. With
+    /// no tie-break the arbitrary release order decides, and an operator asking
+    /// for the newest build can be handed a stale one at the same version.
+    #[test]
+    fn the_newest_release_wins_a_version_tie() {
+        let suffix = if cfg!(target_os = "linux") { Some("ubuntu26") } else { None };
+        let name = if cfg!(target_os = "linux") {
+            "AIdrone_0.1.18_amd64_ubuntu26.deb"
+        } else {
+            "AIdrone_0.1.18_x64-setup.exe"
+        };
+        let releases = [
+            published_release("build-morning", "2026-08-13T09:50:43Z", &[name]),
+            published_release("build-evening", "2026-08-13T15:12:11Z", &[name]),
+            published_release("build-midday", "2026-08-13T10:12:11Z", &[name]),
+        ];
+        let found = pick(&releases, "0.1.17", suffix).expect("a newer build");
+        assert_eq!(found.tag, "build-evening");
+
+        // A tie must never outrank a genuinely higher version, whichever order
+        // the two arrive in.
+        let higher = if cfg!(target_os = "linux") {
+            "AIdrone_0.1.19_amd64_ubuntu26.deb"
+        } else {
+            "AIdrone_0.1.19_x64-setup.exe"
+        };
+        let mixed = [
+            published_release("build-evening", "2026-08-13T15:12:11Z", &[name]),
+            published_release("build-old-but-higher", "2026-08-01T00:00:00Z", &[higher]),
+        ];
+        assert_eq!(
+            pick(&mixed, "0.1.17", suffix).map(|found| found.version),
+            Some("0.1.19".to_owned())
+        );
+        let reversed = [
+            published_release("build-old-but-higher", "2026-08-01T00:00:00Z", &[higher]),
+            published_release("build-evening", "2026-08-13T15:12:11Z", &[name]),
+        ];
+        assert_eq!(
+            pick(&reversed, "0.1.17", suffix).map(|found| found.version),
+            Some("0.1.19".to_owned())
+        );
     }
 
     #[test]
