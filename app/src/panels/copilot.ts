@@ -103,7 +103,11 @@ export function installCopilot(mount: HTMLElement, deps: CopilotDeps = {}): Copi
 
       <div data-k="copilot-chat" role="log" aria-live="polite" aria-relevant="additions text" aria-label="코파일럿 대화" class="flex min-h-0 flex-1 flex-col gap-[11px] overflow-y-auto px-[15px] py-[14px]"></div>
 
-      <div class="flex flex-none items-center gap-[8px] px-[15px] pb-[13px]">
+      <!-- Symmetric padding, and the top half is not redundant with the log's
+           own: that padding lives inside a scroll container, so it scrolls away
+           the moment the transcript overflows and leaves the input flush against
+           the last line. This gap is outside the scroller and always there. -->
+      <div class="flex flex-none items-center gap-[8px] px-[15px] py-[13px]">
         <button type="button" data-k="copilot-mic" aria-label="음성 입력" class="${MIC_OFF}">
           <span aria-hidden="true" class="relative h-[13px] w-[8px] rounded-[4px] bg-current before:absolute before:left-1/2 before:top-[11px] before:h-[5px] before:w-px before:-translate-x-1/2 before:bg-current after:absolute after:left-1/2 after:top-[15px] after:h-px after:w-[12px] after:-translate-x-1/2 after:bg-current"></span>
         </button>

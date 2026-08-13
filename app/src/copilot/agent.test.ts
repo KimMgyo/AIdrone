@@ -318,6 +318,27 @@ describe("decodeToolCall", () => {
     expect(isToolCall(decodeToolCall("observe", undefined))).toBe(true);
   });
 
+  test("a no-argument tool ignores what a model attaches to it", () => {
+    // Models in the chain like to hang a rationale off `observe`, and refusing
+    // it burned the first turn of most tasks - a whole re-sent transcript to
+    // learn what the empty schema already said. There is no argument to honour
+    // here, so there is no wrong outcome to protect against.
+    const observed = decodeToolCall("observe", { reason: "check the scene first" });
+    expect(isToolCall(observed)).toBe(true);
+    expect(isToolCall(observed) ? observed.tool : "").toBe("observe");
+
+    const unlocked = decodeToolCall("unlock", { id: 3 });
+    expect(isToolCall(unlocked)).toBe(true);
+
+    // Tools that DO take arguments still refuse: an undeclared key there may be
+    // the model asking for behaviour dropping it would silently deny.
+    const misnamed = decodeToolCall("fly", { action: "forward", distance: 100 });
+    expect(isToolCall(misnamed)).toBe(false);
+    const why = isToolCall(misnamed) ? "" : misnamed.error;
+    expect(why).toContain("distance");
+    expect(why).toContain("cm");
+  });
+
   test("an over-range value is refused with the way past it, not just the range", () => {
     // A bare range leaves the model to invent a workaround, and the one it
     // invents is to clamp - flying 5 m when 12 m was asked for, silently.

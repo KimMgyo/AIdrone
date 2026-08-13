@@ -370,13 +370,22 @@ function stringArg(tool: string, field: string, value: unknown): string | ToolCa
   return value;
 }
 
-/** A key the schema does not declare is a misremembered call, not a spelling to
- *  guess at - naming it is usually the fastest way for the model to self-correct. */
+/**
+ * A key the schema does not declare is a misremembered call, not a spelling to
+ * guess at - naming it is usually the fastest way for the model to self-correct.
+ *
+ * Only for tools that DO take arguments. The point of refusing is that an
+ * undeclared key may be the model's way of asking for behaviour it will not get:
+ * `distance` instead of `cm` flies the wrong distance if it is quietly dropped.
+ * A tool with no arguments has no such behaviour to get wrong, so refusing one
+ * buys nothing and costs a whole round trip - see the no-argument cases below.
+ */
 function onlyKeys(tool: string, args: Record<string, unknown>, known: readonly string[]): ToolCallError | null {
   const extra = Object.keys(args).filter((key) => !known.includes(key) && args[key] !== undefined);
   if (extra.length === 0) return null;
-  const accepted = known.length === 0 ? "no arguments" : known.join(", ");
-  return { error: `${tool}: unknown argument${extra.length > 1 ? "s" : ""} ${extra.join(", ")}; it accepts ${accepted}` };
+  return {
+    error: `${tool}: unknown argument${extra.length > 1 ? "s" : ""} ${extra.join(", ")}; it accepts ${known.join(", ")}`,
+  };
 }
 
 function argRecord(args: unknown): Record<string, unknown> | null {
@@ -459,16 +468,17 @@ export function decodeToolCall(name: unknown, args: unknown): ToolCall | ToolCal
       if (extra !== null) return extra;
       return { tool: "lock", id };
     }
-    case "unlock": {
-      const extra = onlyKeys("unlock", fields, []);
-      if (extra !== null) return extra;
+    // Neither of these two takes an argument, and both ignore whatever arrives
+    // with them. Refusing an extra key here used to burn the first turn of most
+    // tasks: the models in the chain like to attach a rationale - observe with a
+    // `reason` was the one seen in practice - and the refusal taught them
+    // nothing the empty schema had not already said, while costing a full round
+    // trip and its whole re-sent transcript. There is no argument to honour, so
+    // there is no wrong outcome to protect against.
+    case "unlock":
       return { tool: "unlock" };
-    }
-    case "observe": {
-      const extra = onlyKeys("observe", fields, []);
-      if (extra !== null) return extra;
+    case "observe":
       return { tool: "observe" };
-    }
     case "wait": {
       const seconds = numberArg("wait", "seconds", fields["seconds"], LIMITS.waitSeconds);
       if (isError(seconds)) return seconds;
