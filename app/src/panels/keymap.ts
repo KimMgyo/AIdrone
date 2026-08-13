@@ -117,8 +117,24 @@ export interface KeyMapPanel {
 
 export interface KeyMapDeps {
   sendRc: (cmd: string) => void;
-  sendCommand: (cmd: string) => void;
-  onAction: (tag: "CMD" | "STOP", text: string) => void;
+  /**
+   * The three commands a key sends to the aircraft. The shell sends them AND
+   * writes the timeline line, because each one also has a button behind it -
+   * two copies of "이륙 명령 전송" in two files is one that eventually says
+   * something else.
+   */
+  onCommand: (cmd: "takeoff" | "land" | "emergency") => void;
+  /** A panel-local action with no drone command behind it: SPACE centring the
+   *  sticks is this panel's own doing, so this panel names it. */
+  onAction: (text: string) => void;
+  /**
+   * Fired on the edge where this panel starts and stops writing to `rc`.
+   *
+   * The composition root uses it to silence the follow loop for exactly as long
+   * as a stick is held. Edge-triggered rather than polled, because the thing
+   * downstream has to be a state and not a guess about one.
+   */
+  onOverride?: (active: boolean) => void;
 }
 
 export function installKeyMap(mount: HTMLElement, deps: KeyMapDeps): KeyMapPanel {
@@ -240,6 +256,7 @@ export function installKeyMap(mount: HTMLElement, deps: KeyMapDeps): KeyMapPanel
   function pump(): void {
     const active = sample();
     if (enabled && active) {
+      if (!moving) deps.onOverride?.(true);
       deps.sendRc(sdk());
       moving = true;
       if (loop === 0) loop = window.setInterval(pump, RC_SEND_INTERVAL_MS);
@@ -248,6 +265,9 @@ export function installKeyMap(mount: HTMLElement, deps: KeyMapDeps): KeyMapPanel
     if (moving) {
       deps.sendRc(NEUTRAL);
       moving = false;
+      // After the neutral, not before: the loop we are handing back to would
+      // otherwise get one tick in ahead of our own centring command.
+      deps.onOverride?.(false);
     }
     stopLoop();
   }
@@ -278,10 +298,15 @@ export function installKeyMap(mount: HTMLElement, deps: KeyMapDeps): KeyMapPanel
   /** Centre the sticks and say so once. Shared by SPACE and `neutral()`; both
    *  must leave the loop stopped, or the next tick re-sends a stale zero. */
   function hover(): void {
+    const wasMoving = moving;
     for (const code in IS_STICK) held.delete(code);
     moving = false;
     stopLoop();
     deps.sendRc(NEUTRAL);
+    // Centring the sticks is releasing the wire, so the loop it was taken from
+    // gets it back - SPACE is "stop moving", not "stop the follow", which is
+    // the target box's job.
+    if (wasMoving) deps.onOverride?.(false);
   }
 
   function press(code: string): void {
@@ -294,23 +319,20 @@ export function installKeyMap(mount: HTMLElement, deps: KeyMapDeps): KeyMapPanel
 
     switch (code) {
       case "KeyT":
-        deps.sendCommand("takeoff");
-        deps.onAction("CMD", "이륙 명령 전송");
+        deps.onCommand("takeoff");
         break;
       case "KeyL":
-        deps.sendCommand("land");
-        deps.onAction("CMD", "착륙 명령 전송");
+        deps.onCommand("land");
         break;
       case "Space":
         hover();
-        deps.onAction("CMD", "호버 · RC 중립");
+        deps.onAction("호버 · RC 중립");
         break;
       case "Escape":
         // `emergency` cuts the motors on the spot. It is not a landing - the
-        // airframe drops from wherever it is - which is why the caption reads
-        // 비상 정지 and this reports STOP rather than CMD.
-        deps.sendCommand("emergency");
-        deps.onAction("STOP", "비상 정지 · 모터 즉시 차단");
+        // airframe drops from wherever it is - so the shell reports it as a stop
+        // and stands the follow loop down, exactly as its own red button does.
+        deps.onCommand("emergency");
         break;
       default:
         pump();

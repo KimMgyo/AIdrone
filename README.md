@@ -762,12 +762,12 @@ The live UI is a ground station, not a floating viewer:
   timeline; the stage owns the UDP command console and video overlay.
   Its measurement preserves the decoded video aspect ratio rather than
   stretching the drone image.
-- Manual mode alone enables flight keys. Level controls emit `rc` at 10 Hz while
-  a key is held and one neutral command on release. `T`, `L`, `Space`, and
-  `Escape` are one-shot actions; text inputs retain their own keyboard handling.
-  `Ctrl+B` toggles the left rail, `Ctrl+J` toggles the console, and `f` toggles
-  native-window fullscreen. The displayed `F1`/`F2`/`F3` labels are mode
-  affordances, not global flight key bindings.
+- **The flight keys are live in every mode, not just the manual one.** Level
+  controls emit `rc` at 10 Hz while a key is held and one neutral command on
+  release. `T`, `L`, `Space`, and `Escape` are one-shot actions; text inputs
+  retain their own keyboard handling. `Ctrl+B` toggles the left rail, `Ctrl+J`
+  toggles the console, and `f` toggles native-window fullscreen. The displayed
+  `F1`/`F2`/`F3` labels are mode affordances, not global flight key bindings.
 - The copilot is a real agent: Gemini function calling, executing without a
   per-action approval dialog. Its vocabulary is 11 tools - `fly`, `rotate`,
   `flip`, `speed`, `set_mode`, `lock`, `unlock`, `hold_distance`, `set_power`,
@@ -986,20 +986,46 @@ same event. The same run also cleared two suspects for the reconnect
 complaints: attempts alternated freely between unreachable and reachable, so a
 failed attempt never leaves a port bound and never poisons the next one.
 
-What does work is asking the kernel which **source address** it would use.
-`connect` on UDP puts nothing on the wire - it only resolves a route - and
-`local_addr()` then reports the interface it picked. If that address sits on
-the node's own `/24`, an adapter for the node exists; if the kernel fell back
-to the default route, it does not. `node_present()` is those four lines. It
-beats testing the installer's `192.168.4.50` directly, which an operator is
-free to have set to something else.
+The next idea is asking the kernel which **source address** it would use, since
+`connect` on UDP puts nothing on the wire and `local_addr()` then reports the
+interface it picked. **That shipped and it was wrong on Windows.** Verified
+with a scratch `rustc` build of the exact function body, on a host holding
+`192.168.4.50` with `192.168.4.0/24` on-link:
+
+```
+node 192.168.4.1:  local = 192.168.10.20  -> present = false   # WRONG
+source chosen per destination: 192.168.4.1 -> 192.168.10.20
+```
+
+Linux resolves the route and hands back an address on the node's `/24`; Windows
+returns the default interface's address regardless, before and after a send.
+So the node read as missing while it was plugged in and working - and because
+the reading only refreshed on a failed attempt, it stayed wrong until the cable
+was physically pulled and re-inserted. That is the bug the first-hand report
+described exactly: *"드론만 끄고 노드는 안뽑았는데 NODE가 없음이라고 나오네"*.
+
+What both platforms agree on is **`bind`**: an address no local adapter carries
+fails with `EADDRNOTAVAIL`/`WSAEADDRNOTAVAIL`. So `node_present()` asks whether
+this host holds *any* address on the node's `/24`, one bind at a time. No
+configuration to get wrong - notably not the installer's `192.168.4.50`, which
+an operator is free to have set differently - and no platform API. The node is
+a USB-NCM device, so its adapter and its address disappear together when it is
+unplugged, which is what makes the question meaningful for this hardware.
+Measured on Windows: **1.6 ms** when the address is found, **3.5 ms** for a
+full 254-address miss. It is polled at 1 Hz.
 
 That gives each cell an honest value, including the one that has none: while
 the node is missing the drone cell reads `--`, not "없음", because with no path
 to the aircraft this app cannot claim it is silent.
 
-**Starting the app before attaching the node now works.** The supervisor
-re-checks the adapter once a second while offline, and a node that has just
+**The reading also refreshes whether or not an attempt is in flight.** It used
+to be gated behind `phase === "offline"` *and* `!busy`, so during a connect
+attempt against a dead drone - seconds long - the chip held whatever it last
+said. That gate is what turned a one-off wrong answer into a stuck one, and it
+is the difference between "check the cable" and "power-cycle the drone".
+
+**Starting the app before attaching the node works.** The supervisor re-checks
+the adapter once a second while there is no picture, and a node that has just
 appeared collapses whatever backoff was running - it was counting down against
 a host with no link at all. Measured in the browser mock, flipping the flag
 live: node absent at 7 s with `노드가 연결되어 있지 않습니다 · USB 케이블을
@@ -1043,9 +1069,9 @@ defect rather than a convenience:
 
 | Surface | Owns |
 |---|---|
-| Top bar | Link identity - NODE, TELLO, BATTERY, FLIGHT |
+| Top bar | Link identity - NODE, DRONE - and the controls: 이륙, 착륙, 비상 정지, fullscreen |
 | Status bar | The picture's own pipeline, in wire order: `RX`, `Mb/s`, `GAP`, `IPC`, `DEC`, `PAINT`, `fps`, `DROP`, link verdict |
-| Video overlay | What is true of the frame under it - `960×720 · 4:3`, ALT/SPD/YAW, detection boxes |
+| Video overlay | What is true of the frame under it - `960×720 · 4:3`, ALT/SPD/YAW, detection boxes, BATTERY and FLIGHT, and who is holding the sticks |
 | TELEMETRY panel | The drone's own state datagram, in the SDK's own units: TOF, BARO, TEMP, VX/VY/VZ, attitude |
 | Vision panels | The detections themselves; the status line carries engine, count and analysis time |
 | Follow card | What the loop is putting on the wire, and the authority it is doing it with |
@@ -1288,6 +1314,86 @@ A whole-document sweep at 1600/1280/1024 finds no element overflowing its
 parent's padding box any more. The only remaining hits are absolutely
 positioned row highlights, which are placed against the padding box by
 definition.
+
+### 1024×640 is now a floor the window cannot cross
+
+The two horizontal bars were the last things that reflowed instead of running
+out of room. Every cell in the status strip is a flex item, and a flex item's
+default `min-width:auto` still lets its **text** wrap once the item is squeezed
+- so `RX -- pkt/s` broke onto a second line inside a 26 px strip and pushed the
+numbers out of the window. Both bars are now `whitespace-nowrap` with
+`flex-none` on every child and `overflow-hidden` as the backstop; nothing in
+either one may reflow.
+
+That only holds down to the width the layout declares, so the window is no
+longer allowed below it. `index.html` says `min-w-[1024px] min-h-[640px]` and
+`tauri.conf.json` now carries the same pair as `minWidth`/`minHeight` - an
+**inner** size in Tauri, so the two match by construction. Below the CSS floor
+the document scrolls sideways, which is the failure the window minimum exists
+to prevent; the comment in each file points at the other.
+
+Verified rather than assumed, because a programmatic resize is not the same
+test as a drag: `MoveWindow` bypasses the clamp entirely and happily produced a
+700×480 window. What the OS actually consults is `WM_GETMINMAXINFO`, so that is
+what was read back from the running window:
+
+```
+OS default min track : 136 x 39
+app min track size   : 1298 x 847      # 1024x640 logical at 1.25 scale + borders
+```
+
+At exactly 1024×640 the header measures 52 px and the strip 26 px, neither
+overflows, and the strip's last cell (`LINK STABLE`) is still on screen.
+
+### The keyboard can take the sticks back at any time
+
+The flight keys used to be gated on manual mode, which meant an operator
+watching an autonomous chase go somewhere wrong had to change mode - standing
+the follow loop down as a side effect - before they could touch anything. The
+keys are now enabled whenever there is a picture, in every mode.
+
+That puts two writers on one `rc` channel, and a drone obeys whichever datagram
+landed last. So it is a **handover**, not a race:
+
+- The keymap panel fires an edge-triggered `onOverride(true/false)` exactly when
+  it starts and stops writing to `rc`.
+- `follow.setOverride(true)` stops the loop's timer and it sends **nothing** -
+  not even a neutral. A zero of ours in the middle of the keyboard's stream is
+  one stutter in the stick the operator is holding.
+- The lock and the phase both survive. This is not a halt: a halt is a decision
+  the operator has to undo, and an intervention undoes itself.
+- On release the keymap sends its own trailing neutral **first**, then hands the
+  wire back. The loop re-decides following vs. searching from the same staleness
+  rule as always, so a long intervention cannot end by flying at a target
+  nobody has seen since it began.
+- An emergency stop outranks it. Releasing the keys cannot undo a halt.
+
+All five are pinned by tests in `follow.test.ts`. `Space` is "stop moving", not
+"stop the follow" - it centres the sticks and therefore releases the wire; the
+TARGET box remains the only thing that stops the loop.
+
+**Screen says who is flying.** A box reading 추적 중 while the drone obeys the
+keyboard is the loop claiming credit for someone else's flying, so the badge
+reads **수동 개입** in amber, the beat stops, and the loop's own channel numbers
+are hidden rather than printed at a wire that is not carrying them. The banner
+over the picture reads `MANUAL · 조작 중 · 손 떼면 자동 복귀`. Driven in the
+browser, in ArUco mode with a marker locked:
+
+| | badge | box | banner |
+|---|---|---|---|
+| following | 추적 중 | `border-alert/60` | FOLLOWING |
+| stick held | **수동 개입** | `border-warn/45` | **MANUAL** |
+| released | 추적 중 | `border-alert/60` | FOLLOWING |
+
+…and on the wire, with `send_rc` tapped in ArUco mode: eight `rc 0 60 0 0` while
+`W` was held, exactly one `rc 0 0 0 0` on release, and `T` still reaching
+`send_command takeoff`.
+
+One consequence: `Escape` now cuts the motors from any mode rather than only the
+manual one. Takeoff, land and the emergency each have a key **and** a button in
+the top bar, so all three route through one `flightCommand()` in `main.ts` -
+two copies of "이륙 명령 전송" in two files is one that eventually says
+something else.
 
 ### Native vision stays off the WebView's pixel path
 

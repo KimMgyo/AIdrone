@@ -169,15 +169,23 @@ export function installTargetBox(mount: HTMLElement, accent: TargetAccent, follo
   function paint(): void {
     text(title, view.title);
     text(engine, view.engine);
-    // A detector fault takes the badge; otherwise the phase word carries it,
-    // and no line in this box explains itself in prose.
+    // A detector fault takes the badge; otherwise the operator's own sticks do,
+    // because a box reading 추적 중 while the drone is obeying the keyboard is
+    // the loop claiming credit for someone else's flying. Then the phase word,
+    // which carries what prose used to.
     const trouble = view.trouble;
-    text(badge, trouble ?? LABEL[state.phase]);
-
+    const manual = trouble === null && state.override && state.phase !== "halted";
+    text(badge, trouble ?? (manual ? "수동 개입" : LABEL[state.phase]));
     if (trouble !== null) {
       cls(box, `${BOX} border-alert/45 bg-alert/10`);
       cls(dot, `${DOT} bg-alert`);
       cls(badge, `${BADGE} border border-alert/45 text-alert2`);
+    } else if (manual) {
+      // Amber, and the dot stops beating: the loop is holding its lock but not
+      // flying, which is neither of the two things a red beat means.
+      cls(box, `${BOX} border-warn/45 bg-warn/10`);
+      cls(dot, `${DOT} bg-warn`);
+      cls(badge, `${BADGE} border border-warn/45 text-warn`);
     } else {
       switch (state.phase) {
         case "following":
@@ -208,9 +216,11 @@ export function installTargetBox(mount: HTMLElement, accent: TargetAccent, follo
 
     // Only `following` has channel values worth printing, and a Tello on the
     // ground discards `rc` outright - printing confident numbers at a
-    // motionless airframe would be a lie of omission.
-    command.hidden = state.phase !== "following";
-    if (state.phase === "following") {
+    // motionless airframe would be a lie of omission. Nor while the operator is
+    // the one flying: these are the loop's numbers and the wire is carrying
+    // someone else's.
+    command.hidden = state.phase !== "following" || manual;
+    if (!command.hidden) {
       text(
         command,
         `${state.airborne === false ? "지상 · rc 무시됨 · " : ""}전후 ${state.command.fb} · yaw ${state.command.yaw}`,

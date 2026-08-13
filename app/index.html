@@ -14,7 +14,14 @@
     <!-- One screen. The station holds the canvas the decoder paints into, so
          it is built once and never torn down - a reconnect must not drop the
          WebCodecs config with it. There is nothing to swap to: the link
-         supervises itself and reports through the shell's own chrome. -->
+         supervises itself and reports through the shell's own chrome.
+
+         1024x640 is the floor the layout is designed to, and the SAME pair is
+         the window's `minWidth`/`minHeight` in `src-tauri/tauri.conf.json`.
+         They have to agree: the window minimum is an inner size, so matching it
+         to this means the shell can never be squeezed below what it declares -
+         and below that, this floor makes the document scroll instead, which is
+         the failure the minimum exists to prevent. Change one, change both. -->
     <div
       class="h-screen min-h-[640px] min-w-[1024px] flex flex-col overflow-hidden bg-bg text-ink"
     >

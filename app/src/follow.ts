@@ -305,6 +305,14 @@ export type FollowState = Readonly<{
    * print confident numbers at someone watching a motionless airframe.
    */
   airborne: boolean | null;
+  /**
+   * True while the operator's own sticks are on the wire.
+   *
+   * Not a halt: the loop keeps its lock and its phase, it simply stops sending,
+   * and it picks the target back up the moment the keys are released. A halt is
+   * a decision the operator has to undo; an intervention undoes itself.
+   */
+  override: boolean;
 }>;
 
 /** `paused` is the operator's own hand on the box, and is the only halt they
@@ -346,6 +354,15 @@ export interface FollowController extends FollowPort {
   update(locked: boolean, target: FollowTarget | null, desiredSize: number): void;
   /** From the drone's own state datagram. Display only, never a gate. */
   setAirborne(airborne: boolean | null): void;
+  /**
+   * The operator's sticks have taken the wire, or given it back.
+   *
+   * While on, the loop holds its lock and its phase but sends nothing - two
+   * writers on one `rc` channel is a drone obeying whichever datagram lands
+   * last. Turning it off hands control straight back, which is the whole point:
+   * an intervention is not a decision the operator then has to undo.
+   */
+  setOverride(active: boolean): void;
   /** Emergency, mode change, teardown, or the operator pausing. Halts until
    *  the lock is released, or until `resume()` for a pause they can undo. */
   stop(reason: FollowStopReason): void;
@@ -380,6 +397,8 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
    */
   let stopped: FollowStopReason | null = null;
   let airborne: boolean | null = null;
+  /** See `FollowState.override` - the operator's sticks own the wire. */
+  let override = false;
   let loop = 0;
   let target: FollowTarget | null = null;
   /** The mode's fixed setpoint: 150 px for a marker, 360 px for a person. */
@@ -408,6 +427,7 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
       targetSize: target?.size ?? null,
       desiredSize: modeSize,
       airborne,
+      override,
     };
   }
 
@@ -450,6 +470,9 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
   }
 
   function tick(): void {
+    // Two writers on one `rc` channel is a drone obeying whichever datagram
+    // landed last. While the operator holds a stick, this one stays quiet.
+    if (override) return;
     if (!locked || stopped !== null) return;
     const stale = lastDetectedAt === null ? Number.POSITIVE_INFINITY : now() - lastDetectedAt;
     if (target === null || stale >= LOSS_NEUTRAL_MS) {
@@ -527,6 +550,27 @@ export function createFollowController(deps: FollowDeps, config: FollowConfig = 
     setAirborne(next): void {
       if (next === airborne) return;
       airborne = next;
+      announce(null);
+    },
+
+    setOverride(active): void {
+      if (active === override) return;
+      override = active;
+      if (override) {
+        // No neutral from here: the keyboard is already writing to the same
+        // channel, and a zero of ours in the middle of its stream is one
+        // stutter in the stick the operator is holding.
+        stopLoop();
+        moving = false;
+        command = FOLLOW_NEUTRAL;
+        announce(null);
+        return;
+      }
+      // Handing the wire back. `tick` re-decides following vs searching from
+      // the same staleness rule as always, so a long intervention cannot end by
+      // flying at a target nobody has seen since it started.
+      if (locked && stopped === null && loop === 0) loop = start(tick, RC_SEND_INTERVAL_MS);
+      tick();
       announce(null);
     },
 

@@ -131,12 +131,10 @@ const appWindow = getCurrentWindow();
 
 const station = installStation(stationRoot, {
   onUpdate: () => void applyUpdate(),
-  onEmergency: () => {
-    void runCommand("emergency");
-    timeline.push("STOP", "비상 정지 · 모터 즉시 차단");
-    emergencyStopped();
-  },
+  onEmergency: () => flightCommand("emergency"),
   onFullscreen: () => void fullscreen(),
+  onTakeoff: () => flightCommand("takeoff"),
+  onLand: () => flightCommand("land"),
 });
 
 // --- panels ----------------------------------------------------------------
@@ -230,14 +228,12 @@ function pushFollowTarget(): void {
 
 const keymap = installKeyMap(station.mounts.manual, {
   sendRc,
-  sendCommand: (cmd) => void runCommand(cmd),
-  // The panel reports STOP for the Escape key and deliberately leaves the
-  // sticks alone; zeroing them is the shell's call because the red button in
-  // the top bar has to do exactly the same thing.
-  onAction: (tag, textLine) => {
-    timeline.push(tag, textLine);
-    if (tag === "STOP") emergencyStopped();
-  },
+  onCommand: flightCommand,
+  onAction: (textLine) => timeline.push("CMD", textLine),
+  // The keyboard is live in every mode, so it and the follow loop share one
+  // `rc` channel. This is the handover: while a stick is held the loop goes
+  // quiet, and it takes the wire straight back on release.
+  onOverride: (active) => follow.setOverride(active),
 });
 
 const modeSelector = installModeSelector(station.mounts.mode, {
@@ -295,8 +291,13 @@ function setMode(nextMode: ControlMode): void {
   vision.setMode(mode);
   station.setMode(mode);
   modeSelector.setMode(mode);
-  if (mode !== "key") keymap.neutral();
-  keymap.setEnabled(controlsReady && mode === "key");
+  // The keyboard is live in every mode. It used to be manual-mode only, which
+  // meant an operator watching an autonomous chase go wrong had to change mode
+  // before they could touch the sticks. Now it intervenes on the spot and the
+  // loop resumes when they let go - see `onOverride` above. No `neutral()` on
+  // the way out of a mode either: that would centre sticks the operator may be
+  // holding right now.
+  keymap.setEnabled(controlsReady);
   // The detector may report during the native handshake. Its observations are
   // useful to paint, but cannot select an RC loop before a frame proves the
   // operator can see what it would follow.
@@ -443,6 +444,24 @@ async function runCommand(cmd: string): Promise<CommandResult> {
     consolePanel.push("err", `!  ${detail}`);
     return { status: "failed", detail: `${cmd} · ${detail}` };
   }
+}
+
+/**
+ * Every command with both a key and a button behind it. One function, so the two
+ * surfaces cannot drift into sending different things or naming the same action
+ * two different ways.
+ *
+ * `emergency` is not a landing - the motors stop and the airframe drops from
+ * wherever it is - so it reports as a stop and stands the follow loop down.
+ */
+function flightCommand(cmd: "takeoff" | "land" | "emergency"): void {
+  void runCommand(cmd);
+  if (cmd === "emergency") {
+    timeline.push("STOP", "비상 정지 · 모터 즉시 차단");
+    emergencyStopped();
+    return;
+  }
+  timeline.push("CMD", cmd === "takeoff" ? "이륙 명령 전송" : "착륙 명령 전송");
 }
 
 function errText(err: unknown): string {
@@ -720,7 +739,7 @@ async function attempt(): Promise<void> {
     setPhase("online", "");
     timeline.push("LINK", `세션 시작 · Tello SDK 2.0`);
     consolePanel.push("info", `session up with painted video in ${ms} ms`);
-    keymap.setEnabled(mode === "key");
+    keymap.setEnabled(true);
     consolePanel.setEnabled(true);
   } catch (err) {
     failures++;
@@ -771,6 +790,11 @@ async function probeSockets(): Promise<void> {
  * keep in step with the repaint that renders its decisions.
  */
 function superviseLink(): void {
+  // The node chip moves whether or not an attempt is in flight. While online
+  // the picture proves the node, and during a failed attempt - which can take
+  // seconds against a dead drone - a stale reading here is the difference
+  // between "check the cable" and "power-cycle the drone".
+  if (phase !== "online") pollNode();
   if (busy || updateApplying) return;
   if (phase === "online") {
     if (renderer === null) {
@@ -795,24 +819,25 @@ function superviseLink(): void {
     return;
   }
   if (phase !== "offline") return;
-  // The node chip must move the moment the cable goes in, not only when the
-  // next attempt happens to run - on a long backoff those are seconds apart,
-  // and the chip is what tells the operator the cable worked.
+  if (performance.now() >= retryAt) void attempt();
+}
+
+/** Rate-limited, and never while a session is up: the picture is the proof
+ *  then, and the sweep would just be 254 binds nobody reads. */
+function pollNode(): void {
   const now = performance.now();
-  if (now - nodeCheckedAt >= NODE_POLL_MS) {
-    nodeCheckedAt = now;
-    void nodePresent()
-      .then((up) => {
-        // A node that has just appeared makes the current backoff pointless:
-        // it was counting down against a host with no link at all.
-        if (up && !nodeUp) retryAt = Math.min(retryAt, performance.now());
-        nodeUp = up;
-      })
-      .catch(() => {
-        nodeUp = false;
-      });
-  }
-  if (now >= retryAt) void attempt();
+  if (now - nodeCheckedAt < NODE_POLL_MS) return;
+  nodeCheckedAt = now;
+  void nodePresent()
+    .then((up) => {
+      // A node that has just appeared makes the current backoff pointless: it
+      // was counting down against a host with no link at all.
+      if (up && !nodeUp) retryAt = Math.min(retryAt, performance.now());
+      nodeUp = up;
+    })
+    .catch(() => {
+      nodeUp = false;
+    });
 }
 
 // --- fullscreen ------------------------------------------------------------

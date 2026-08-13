@@ -285,6 +285,81 @@ describe("createFollowController", () => {
     expect(h.lastReason()).toBe("mode");
   });
 
+  test("the keyboard silences the loop without ever centring the sticks", () => {
+    // Two writers on one `rc` channel is a drone obeying whichever datagram
+    // landed last. A neutral from here would be one stutter in the stick the
+    // operator is holding, so the loop goes quiet and sends nothing at all.
+    const h = harness();
+    h.controller.update(true, at(860, 100), 150);
+    h.sent.length = 0;
+
+    h.controller.setOverride(true);
+    for (let i = 0; i < 5; i++) {
+      h.controller.update(true, at(860, 100), 150);
+      h.advance(100);
+      h.pump();
+    }
+    expect(h.sent).toEqual([]);
+    expect(h.controller.state().override).toBe(true);
+    // Not a halt: the lock and the phase both survive, which is what makes the
+    // release a handover rather than a restart.
+    expect(h.controller.state().phase).toBe("following");
+  });
+
+  test("releasing the keys hands the wire straight back, with no operator action", () => {
+    const h = harness();
+    h.controller.update(true, at(860, 100), 150);
+    h.controller.setOverride(true);
+    h.sent.length = 0;
+
+    h.controller.setOverride(false);
+    expect(h.sent.length).toBeGreaterThan(0);
+    expect(h.controller.state().override).toBe(false);
+    expect(h.controller.state().phase).toBe("following");
+    expect(h.running()).toBe(true);
+  });
+
+  test("a long intervention cannot end by flying at a target nobody has seen", () => {
+    // The staleness rule is the loop's own and taking the wire away does not
+    // suspend it: hand back after the target is gone and the loop is searching,
+    // never re-issuing the deflection that was live when the keys went in.
+    //
+    // Nothing reaches the wire, and that is the correct amount: the keyboard's
+    // own trailing neutral is already on it - `onOverride(false)` fires after
+    // that send, by construction at the only callsite - so a zero from here
+    // would be a duplicate.
+    const h = harness();
+    h.controller.update(true, at(860, 100), 150);
+    const deflection = h.last();
+    expect(deflection).not.toBe("rc 0 0 0 0");
+    h.controller.setOverride(true);
+    h.advance(LOSS_NEUTRAL_MS + 1_000);
+    h.sent.length = 0;
+
+    h.controller.setOverride(false);
+    expect(h.controller.state().phase).toBe("searching");
+    expect(h.sent).toEqual([]);
+    expect(h.controller.state().command).toEqual(FOLLOW_NEUTRAL);
+
+    // And it stays neutral while the target is missing, rather than the next
+    // tick reviving what the operator interrupted.
+    h.advance(100);
+    h.pump();
+    expect(h.sent).not.toContain(deflection);
+  });
+
+  test("an emergency stop outranks the keyboard, and the release cannot undo it", () => {
+    const h = harness();
+    h.controller.update(true, at(860, 100), 150);
+    h.controller.setOverride(true);
+    h.controller.stop("emergency");
+    h.sent.length = 0;
+
+    h.controller.setOverride(false);
+    expect(h.controller.state().phase).toBe("halted");
+    expect(h.sent.every((command) => command === "rc 0 0 0 0")).toBe(true);
+  });
+
   test("a pause centres the sticks and resume puts the same lock back to work", () => {
     const h = harness();
     h.controller.update(true, at(860, 100), 150);

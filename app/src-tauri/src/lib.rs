@@ -18,7 +18,7 @@ mod video;
 mod vision;
 
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -466,37 +466,39 @@ fn endpoints() -> serde_json::Value {
     })
 }
 
-/// Whether the node's link exists on this host at all - which is a different
-/// question from whether the drone answers, and the panel now reports the two
-/// separately because the fixes are different (plug the cable in / power-cycle
-/// the drone).
+/// Whether the node's link exists on this host at all - a different question
+/// from whether the drone answers, and the panel reports the two separately
+/// because the fixes are different: plug the cable in, or power-cycle the drone.
 ///
-/// Measured, not assumed: a connected UDP socket cannot tell the two apart.
-/// With no route to 192.168.4.0/24 `connect()` still succeeds and `send()`
-/// still reports 7 bytes written, because the datagram leaves by the default
-/// route and dies out there - identical, from the socket, to a drone that is
-/// simply not answering.
+/// **A connected UDP socket cannot tell them apart.** With no route to
+/// 192.168.4.0/24, `connect()` still succeeds and `send()` still reports every
+/// byte written, because the datagram leaves by the default route and dies out
+/// there - identical, from the socket, to a drone that is not answering.
 ///
-/// So ask the kernel which SOURCE address it would use. `connect` on UDP puts
-/// no packet on the wire; it only resolves the route. If the source it picks
-/// sits on the node's own /24, an adapter for that subnet exists. If it falls
-/// back to the default route's address, there is no node. This beats testing
-/// the installer's `192.168.4.50` directly, which an operator is free to have
-/// set to something else.
+/// Asking the kernel for the SOURCE address it would use looks like the answer
+/// and is a platform trap. On Linux `connect()` resolves the route and
+/// `local_addr()` reports an address on the node's own /24. **On Windows it
+/// does not**: with the /24 on-link and `192.168.4.50` held, `local_addr()`
+/// still returns the default interface's address, before and after a send.
+/// That shipped as a Windows-only bug where the node read as missing for the
+/// rest of a session the moment one connect failed.
+///
+/// What both platforms agree on is `bind`: an address no local adapter carries
+/// is `EADDRNOTAVAIL`/`WSAEADDRNOTAVAIL`. So this asks whether the host holds
+/// ANY address on the node's /24, one bind at a time. No configuration to get
+/// wrong - notably not the installer's `192.168.4.50`, which an operator is
+/// free to have set differently - and no platform API. The node is a USB-NCM
+/// device, so its adapter and its address disappear together when it is
+/// unplugged, which is exactly what makes this meaningful for this hardware.
+///
+/// Measured on Windows: 1.6 ms when the address is found, 3.5 ms for a full
+/// 254-address miss. Polled at 1 Hz, that is nothing.
 #[tauri::command]
 fn node_present() -> bool {
-    let node = from_env("AIDRONE_DEVICE_IP", DEVICE_IP);
-    let Ok(sock) = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)) else {
-        return false;
-    };
-    // Port 9 (discard) is never contacted - connect resolves a route and stops.
-    if sock.connect(SocketAddrV4::new(node, 9)).is_err() {
-        return false;
-    }
-    match sock.local_addr() {
-        Ok(SocketAddr::V4(local)) => local.ip().octets()[..3] == node.octets()[..3],
-        _ => false,
-    }
+    let [a, b, c, _] = from_env("AIDRONE_DEVICE_IP", DEVICE_IP).octets();
+    (1..=254u8).any(|host| {
+        UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::new(a, b, c, host), 0)).is_ok()
+    })
 }
 
 /// The 250 payload codes of the marker dictionary, for the panel's 6x6 drawing

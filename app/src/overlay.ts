@@ -323,14 +323,25 @@ export function installStageOverlay(mount: HTMLElement): StageOverlay {
     setFollow(state) {
       followState = state;
       const phase = followState?.phase ?? "idle";
-      const live = phase === "following" || phase === "searching";
-      const base = "absolute left-1/2 top-[52px] -translate-x-1/2 items-center gap-[9px] rounded-[3px] border border-alert px-[12px] py-[6px]";
-      cls(followBanner, live ? `${base} flex ${phase === "following" ? "bg-alert/85" : "bg-alert/55"}` : `${base} hidden`);
+      // The banner is over the picture, which is where the operator is looking
+      // while they fly. So it says who is holding the sticks: an intervention
+      // reads MANUAL in amber, not FOLLOWING in red, because the loop is not
+      // the one moving the drone.
+      const manual = followState?.override === true && phase !== "halted";
+      const live = manual || phase === "following" || phase === "searching";
+      const accent = manual ? "border-warn" : "border-alert";
+      const base = `absolute left-1/2 top-[52px] -translate-x-1/2 items-center gap-[9px] rounded-[3px] border ${accent} px-[12px] py-[6px]`;
+      const fill = manual ? "bg-warn/80" : phase === "following" ? "bg-alert/85" : "bg-alert/55";
+      cls(followBanner, live ? `${base} flex ${fill}` : `${base} hidden`);
       if (!live || followState === null) return;
-      text(followLabel, phase === "following" ? "FOLLOWING" : "TARGET LOST");
+      text(followLabel, manual ? "MANUAL" : phase === "following" ? "FOLLOWING" : "TARGET LOST");
       text(
         followDetail,
-        phase === "following" ? `전후 ${followState.command.fb} · yaw ${followState.command.yaw}` : "스틱 중립 · 잠금 유지",
+        manual
+          ? "조작 중 · 손 떼면 자동 복귀"
+          : phase === "following"
+            ? `전후 ${followState.command.fb} · yaw ${followState.command.yaw}`
+            : "스틱 중립 · 잠금 유지",
       );
     },
   };

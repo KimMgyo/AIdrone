@@ -114,10 +114,19 @@ const PANEL_MIN = 190;
 const PANEL_MAX = 290;
 const MISSING = "--";
 
-const CHIP = "flex items-center gap-[7px] h-[26px] px-[10px] bg-chip border border-[#232931] rounded-[3px]";
+const CHIP =
+  "flex flex-none items-center gap-[7px] h-[26px] px-[10px] bg-chip border border-[#232931] rounded-[3px]";
 const TOGGLE =
-  "w-[28px] h-[26px] bg-chip border border-[#232931] rounded-[3px] cursor-pointer flex items-center justify-center hover:bg-[#1C222A] hover:border-line4";
+  "flex-none w-[28px] h-[26px] bg-chip border border-[#232931] rounded-[3px] cursor-pointer flex items-center justify-center hover:bg-[#1C222A] hover:border-line4";
 const HEADER_DOT = "w-[6px] h-[6px] rounded-full";
+/** Every divider in the bar. `flex-none` because a 1px rule that flexes is a
+ *  0px rule the moment the window is narrow. */
+const RULE = "w-px h-[20px] flex-none bg-line";
+/** Takeoff and land. Same footprint as the emergency button beside them so the
+ *  three read as one group, but never its colour - the red one has to stay the
+ *  only red thing in the bar. */
+const FLIGHT_BTN =
+  "h-[30px] flex-none px-[13px] border rounded-[3px] text-[12px] font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-default";
 
 /** The hatch's headline, which is about the picture and so still follows the
  *  phase. The two chips beside it answer a narrower question each. */
@@ -137,6 +146,10 @@ function peerCopy(up: boolean | null): { copy: string; dot: string } {
 type StationDeps = {
   onEmergency: () => void;
   onUpdate: () => void;
+  /** The two flight commands in the top bar. Same path as the T and L keys -
+   *  the shell does not decide whether they are allowed, it only asks. */
+  onTakeoff: () => void;
+  onLand: () => void;
   /**
    * The Tauri host can provide its native window toggle. The browser fallback
    * keeps the visual control useful in a plain webview without coupling this
@@ -155,12 +168,15 @@ function finite(value: number | null): number | null {
 
 export function installStation(mount: HTMLElement, deps: StationDeps): Station {
   mount.innerHTML = `
-    <div class="h-[52px] flex-none border-b border-line bg-[#101318] flex items-center px-[13px] gap-[14px]">
-      <div class="flex items-center gap-[9px]">
-        <div class="w-[9px] h-[9px] bg-accent rounded-[2px]"></div>
+    <!-- Nowrap, and every item flex-none: at a narrow window the bar must run
+         out of room rather than reflow, because the window has a minimum width
+         that fits it exactly once (see tauri.conf.json). -->
+    <div class="h-[52px] flex-none border-b border-line bg-[#101318] flex items-center overflow-hidden px-[13px] gap-[13px] whitespace-nowrap">
+      <div class="flex flex-none items-center gap-[9px]">
+        <div class="w-[9px] h-[9px] flex-none bg-accent rounded-[2px]"></div>
         <div class="text-[13px] font-semibold tracking-[-.01em]">AIdrone Station</div>
       </div>
-      <div class="w-px h-[20px] bg-line"></div>
+      <div class="${RULE}"></div>
 
       <!-- Two chips, because there are two connections and they fail
            separately: the node is a USB adapter that is either attached or
@@ -182,20 +198,9 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
         <button data-k="update-apply" type="button" class="h-[19px] rounded-[2px] bg-accent px-[7px] font-mono text-[10px] font-semibold text-[#08131A] cursor-pointer hover:bg-accent2 disabled:opacity-50 disabled:cursor-default">설치</button>
       </div>
 
-      <div class="flex-1"></div>
+      <div class="flex-1 min-w-[8px]"></div>
 
-      <div class="flex items-center gap-[18px] pr-[6px]">
-        <div class="flex flex-col gap-[2px] items-end">
-          <div class="font-mono text-[9.5px] tracking-[.14em] text-dim2">BATTERY</div>
-          <div data-k="bat" class="font-mono text-[13px] text-dim">--</div>
-        </div>
-        <div class="flex flex-col gap-[2px] items-end">
-          <div class="font-mono text-[9.5px] tracking-[.14em] text-dim2">FLIGHT</div>
-          <div data-k="flight" class="font-mono text-[13px] text-ink2">--</div>
-        </div>
-      </div>
-
-      <div class="flex items-center gap-[5px] pr-[2px]">
+      <div class="flex flex-none items-center gap-[5px]">
         <button data-k="tg-left" type="button" title="좌측 패널 (Ctrl+B)" class="${TOGGLE}">
           <div class="relative w-[15px] h-[11px] border border-[#7C848F] rounded-[1px]">
             <div data-k="gl-left" class="absolute left-0 top-0 bottom-0 w-[4px] bg-accent"></div>
@@ -207,10 +212,27 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
           </div>
         </button>
       </div>
-      <div class="w-px h-[20px] bg-line"></div>
+      <div class="${RULE}"></div>
 
+      <!-- Takeoff, land, then the emergency. Ordered by how bad it is to hit
+           the wrong one: the two flight commands are ordinary buttons in the
+           app's own tones, and the red one keeps its own space at the end. -->
+      <button data-k="takeoff" type="button" title="이륙 (T)"
+        class="${FLIGHT_BTN} border-ok/40 bg-ok/10 text-ok hover:bg-ok/20 hover:border-ok/60">이륙</button>
+      <button data-k="land" type="button" title="착륙 (L)"
+        class="${FLIGHT_BTN} border-line4 bg-raised text-ink2 hover:bg-[#1C222A] hover:border-[#7C848F]">착륙</button>
       <button data-k="estop" type="button" title="모터 즉시 정지 (ESC)"
-        class="h-[30px] px-[15px] bg-alert/12 border border-alert/45 rounded-[3px] text-alert2 text-[12px] font-semibold cursor-pointer hover:bg-alert/22 hover:text-[#FFB3B3]">비상 정지</button>
+        class="h-[30px] flex-none px-[15px] bg-alert/12 border border-alert/45 rounded-[3px] text-alert2 text-[12px] font-semibold cursor-pointer hover:bg-alert/22 hover:text-[#FFB3B3]">비상 정지</button>
+
+      <div class="${RULE}"></div>
+      <!-- Last, because it is the only control here that changes the shape of
+           the window rather than the state of the aircraft. -->
+      <button data-k="fullscreen" type="button" title="전체 화면 (F)"
+        class="flex flex-none items-center justify-center w-[26px] h-[26px] bg-raised border border-line3 rounded-[3px] text-dim cursor-pointer hover:bg-[#1C222A] hover:border-line4 hover:text-ink2">
+        <svg aria-hidden="true" viewBox="0 0 16 16" class="w-[13px] h-[13px] fill-none stroke-current stroke-[1.25]">
+          <path d="M6 2H2v4M10 2h4v4M14 10v4h-4M2 10v4h4"></path>
+        </svg>
+      </button>
     </div>
 
     <div data-k="row" class="flex-1 min-h-0 flex">
@@ -237,12 +259,24 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
           </div>
           <canvas id="video" width="960" height="720" class="absolute inset-0"></canvas>
           <div data-k="m-overlay" class="absolute inset-0 pointer-events-none"></div>
-          <button data-k="fullscreen" type="button" title="전체 화면 (F)"
-            class="absolute top-[13px] right-[15px] flex items-center justify-center w-[24px] h-[24px] bg-bg/75 border border-line3 rounded-[3px] text-dim hover:bg-[#1C222A] hover:border-line4 hover:text-ink2">
-            <svg aria-hidden="true" viewBox="0 0 16 16" class="w-[13px] h-[13px] fill-none stroke-current stroke-[1.25]">
-              <path d="M6 2H2v4M10 2h4v4M14 10v4h-4M2 10v4h4"></path>
-            </svg>
-          </button>
+          <!-- Battery and flight time sit on the picture, not in the top bar.
+               They are the two readings an operator checks while flying, and
+               flying means watching this rectangle - a number two feet away
+               from where the eyes are is a number nobody reads in time.
+               Bottom-left, out of the way of a subject that tends to be
+               centred, and pointer-events-none so it can never eat a click
+               meant for the stage. -->
+          <div data-k="aircraft" class="absolute left-[13px] bottom-[11px] flex items-end gap-[13px] pointer-events-none rounded-[3px] border border-line2/70 bg-bg/70 px-[10px] py-[6px]" hidden>
+            <div class="flex flex-col gap-[1px]">
+              <div class="font-mono text-[9px] tracking-[.14em] text-dim3">BATTERY</div>
+              <div data-k="bat" class="font-mono text-[15px] leading-none text-dim">--</div>
+            </div>
+            <div class="w-px self-stretch bg-line2"></div>
+            <div class="flex flex-col gap-[1px]">
+              <div class="font-mono text-[9px] tracking-[.14em] text-dim3">FLIGHT</div>
+              <div data-k="flight" class="font-mono text-[15px] leading-none text-ink2">--</div>
+            </div>
+          </div>
         </div>
         <div data-k="m-console" class="flex-none border-t border-line bg-sunken flex flex-col"></div>
       </div>
@@ -256,19 +290,27 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     <!-- One strip, one subject: everything here measures the pipeline that
          carries the picture, left to right in the order the bytes travel -
          off the wire, through the IPC hop, through the decoder, onto the
-         canvas. Nothing about the aircraft belongs here. -->
-    <div class="h-[26px] flex-none border-t border-line bg-[#0D1014] flex items-center px-[14px] gap-[18px] font-mono text-[10.5px] text-dim2">
-      <div data-k="status" class="text-dim">idle</div>
-      <div class="flex-1"></div>
-      <div>RX <span data-k="rx">--</span> pkt/s</div>
-      <div><span data-k="mbps">--</span> Mb/s</div>
-      <div>GAP <span data-k="gap">--</span> ms</div>
-      <div>IPC <span data-k="ipc">--</span> ms</div>
-      <div>DEC <span data-k="dec">--</span> ms</div>
-      <div>PAINT <span data-k="rtt">--</span> ms</div>
-      <div><span data-k="fps">--</span> fps</div>
-      <div>DROP <span data-k="drop">--</span></div>
-      <div data-k="link" class="text-dim2">LINK IDLE</div>
+         canvas. Nothing about the aircraft belongs here.
+
+         Every cell is flex-none and nowrap. A flex item's default
+         min-width:auto still lets its TEXT wrap once the item is squeezed, so
+         "RX -- pkt/s" broke into two lines inside a 26 px strip and pushed the
+         numbers out of the window. Nothing here may reflow: the strip is a fixed
+         row of readings, and the window has a minimum width that fits all of
+         them (see tauri.conf.json). Hidden overflow is the backstop for a
+         browser tab, which has no such minimum. -->
+    <div class="h-[26px] flex-none border-t border-line bg-[#0D1014] flex items-center overflow-hidden px-[14px] gap-[16px] font-mono text-[10.5px] text-dim2 whitespace-nowrap">
+      <div data-k="status" class="flex-none text-dim">idle</div>
+      <div class="flex-1 min-w-[8px]"></div>
+      <div class="flex-none">RX <span data-k="rx">--</span> pkt/s</div>
+      <div class="flex-none"><span data-k="mbps">--</span> Mb/s</div>
+      <div class="flex-none">GAP <span data-k="gap">--</span> ms</div>
+      <div class="flex-none">IPC <span data-k="ipc">--</span> ms</div>
+      <div class="flex-none">DEC <span data-k="dec">--</span> ms</div>
+      <div class="flex-none">PAINT <span data-k="rtt">--</span> ms</div>
+      <div class="flex-none"><span data-k="fps">--</span> fps</div>
+      <div class="flex-none">DROP <span data-k="drop">--</span></div>
+      <div data-k="link" class="flex-none text-dim2">LINK IDLE</div>
     </div>
   `;
 
@@ -307,6 +349,13 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
     rtt: q("rtt", HTMLSpanElement),
     bat: q("bat", HTMLDivElement),
     flight: q("flight", HTMLDivElement),
+    // `aircraft`, not `hud`: the stage overlay already owns a `hud` for
+    // ALT/SPD/YAW, and both live under this mount. The two only stayed apart
+    // because this install runs before the overlay fills its own container -
+    // an ordering nobody should have to know about.
+    aircraft: q("aircraft", HTMLDivElement),
+    takeoff: q("takeoff", HTMLButtonElement),
+    land: q("land", HTMLButtonElement),
     status: q("status", HTMLDivElement),
     rx: q("rx", HTMLSpanElement),
     fps: q("fps", HTMLSpanElement),
@@ -354,6 +403,8 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
 
   cell.updateApply.addEventListener("click", deps.onUpdate);
   q("estop", HTMLButtonElement).addEventListener("click", deps.onEmergency);
+  cell.takeoff.addEventListener("click", deps.onTakeoff);
+  cell.land.addEventListener("click", deps.onLand);
 
   function setLeft(open: boolean): void {
     leftOpen = open;
@@ -412,6 +463,13 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       style(hatch, "display", m.live ? "none" : "block");
       style(hatchLabel, "display", m.live ? "none" : "flex");
       style(canvas, "display", m.live ? "block" : "none");
+      // The readout belongs to the picture, so it lives and dies with it -
+      // over the hatch it would be two dashes floating on a texture.
+      cell.aircraft.hidden = !m.live;
+      // Neither command means anything without a link, and a button that looks
+      // pressable when it is not is the panel making a promise for the drone.
+      cell.takeoff.disabled = !m.live;
+      cell.land.disabled = !m.live;
 
       // Each chip answers its own question; the hatch keeps the headline about
       // the picture, which is the thing neither chip is about.
@@ -432,7 +490,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
         if (m.update.error !== null) cell.updateApply.title = m.update.error;
       }
 
-      // Battery and flight time are the only aircraft readings up here; every
+      // Battery and flight time are painted onto the picture (see `hud`); every
       // measurement of the picture's own path lives in the strip below.
 
       // Battery is the one readout that changes colour, and it uses the drone's
@@ -442,7 +500,7 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
       text(cell.bat, battery === null ? MISSING : `${battery}%`);
       const batTone =
         battery === null ? "text-dim" : battery >= 30 ? "text-ok" : battery >= 15 ? "text-warn" : "text-alert";
-      cell.bat.className = `font-mono text-[13px] ${batTone}`;
+      cell.bat.className = `font-mono text-[15px] leading-none ${batTone}`;
 
       const flight = finite(m.flightS);
       text(cell.flight, flight === null ? MISSING : mmss(flight));
