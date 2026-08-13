@@ -73,6 +73,33 @@ uint32_t g_last_report = 0;
 ncm::Stats g_prev_ncm;
 shuttle::Stats g_prev_shuttle;
 
+// ---- status LED -------------------------------------------------------------
+// The board's single WS2812 on GPIO48 (see variants/aidrone_s3/pins_arduino.h).
+//
+// It reports the DRONE's half of the path and nothing else: green once the Tello
+// is associated with the soft-AP AND holds a lease, red until then. The host has
+// a whole screen for the USB half; this LED is the only thing an operator can
+// read while looking at the aircraft instead of the laptop.
+//
+// `tello_ip()` rather than `clients()` on purpose. An associated station that
+// has not been given an address yet cannot be talked to, so calling that green
+// would be a claim the bridge cannot back. The gap is one DHCP exchange wide.
+constexpr uint8_t kLedLevel = 40; // of 255; the onboard WS2812 is painful at full
+
+void update_led() {
+  const bool linked = shuttle::tello_ip() != 0;
+  // Write only on change: rgbLedWrite() bit-bangs the WS2812 with interrupts
+  // masked, and loop() runs every 5 ms. Repainting an unchanged colour 200 times
+  // a second would be 200 needless critical sections on the core the shuttle
+  // shares.
+  static int8_t painted = -1;
+  if (painted == (int8_t)linked) {
+    return;
+  }
+  painted = (int8_t)linked;
+  rgbLedWrite(RGB_BUILTIN, linked ? 0 : kLedLevel, linked ? kLedLevel : 0, 0);
+}
+
 String mac_str(const uint8_t *m) {
   char buf[18];
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
@@ -97,7 +124,7 @@ void print_help() {
   con.println(F("  w on|off            wifi shuttle USB leg"));
   con.println(F("  r                   reset counters"));
   con.println(F("  i                   info"));
-  con.println(F("  x                   bounce USB 3 s - revives a dead host NIC"));
+  con.println(F("  x                   detach USB 12 s - revives a dead host NIC"));
   con.println(F("  h                   help"));
 }
 
@@ -112,6 +139,9 @@ void print_info() {
   con.printf("clients    : %u\n", shuttle::clients());
   const uint32_t ip = shuttle::tello_ip();
   con.printf("tello lease: %s\n", ip ? IPAddress(ip).toString().c_str() : "(none yet)");
+  // Printed beside the lease it is derived from, so a green LED with no lease
+  // would be visible as the contradiction it is.
+  con.printf("status led : %s\n", ip ? "green (drone linked)" : "red (no drone)");
   con.printf("shuttle    : %s\n", shuttle::enabled() ? "on" : "off");
   con.printf("bench      : %s", bench::running() ? "running" : "stopped");
   if (bench::running()) {
@@ -178,17 +208,18 @@ void handle_line(char *line) {
     case 'x':
       // The host NCM datapath dies while link_up() still says "up". Measured
       // remedies, in the order they were tried and what each did:
-      //   50 ms USB bounce      - no (device re-enumerates, adapter stays dead)
-      //   ESP.restart()         - no (same: PnP reports the NCM function OK)
-      //   Restart-NetAdapter    - no (even against a freshly restarted device)
+      //   50 ms USB bounce       - no (device re-enumerates, adapter stays dead)
+      //   ESP.restart()          - no (same: PnP reports the NCM function OK)
+      //   Restart-NetAdapter     - no (even against a freshly restarted device)
+      //   3 s USB bounce         - no (re-confirmed against a live wedge: the
+      //                            device read usb=up, stall=0 the whole time)
       //   reflash (~12 s in ROM) - yes, every time
-      // The common factor in the one that works is a LONG absence, so this is a
-      // 3 s detach. Better than 50 ms, not sufficient: on a later persistent
-      // wedge the 3 s bounce, Restart-NetAdapter, and the two combined each
-      // left the adapter at "Disconnected / 0 bps", and only a reflash cleared
-      // it. The CDC console survives the wedge, which is what makes this
-      // reachable at all: the host detects the silence and can ask for the cure.
-      con.println(F("[ncm] bouncing USB for 3 s to force the host to rebuild the NIC"));
+      // Long absence is the only variable that tracks the cure, so the detach
+      // now matches the reflash's ~12 s rather than merely beating a debounce;
+      // see kBounceDetachMs in ncm.cpp. The CDC console survives the wedge,
+      // which is what makes this reachable at all: the host detects the silence
+      // and can ask for the cure.
+      con.println(F("[ncm] detaching USB for 12 s to force the host to rebuild the NIC"));
       con.flush();
       ncm::recover();
       break;
@@ -306,6 +337,11 @@ void setup() {
   print_help();
   con.println();
 
+  // Red before the first loop() rather than dark: an unlit LED and a dead board
+  // look identical, and the whole point of this thing is to be readable from
+  // across the room with the laptop closed.
+  update_led();
+
   g_last_report = millis();
   ncm::snapshot(g_prev_ncm);
   shuttle::snapshot(g_prev_shuttle);
@@ -314,5 +350,6 @@ void setup() {
 void loop() {
   poll_console();
   report();
+  update_led();
   delay(5);
 }

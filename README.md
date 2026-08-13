@@ -1093,6 +1093,77 @@ nothing while DTR is low, so a reader that leaves it low - as
 `desktop/console.ps1` does, correctly, for the CH343 bridge - sees an empty port
 and reads it as a dead device. That cost one wrong diagnosis here.
 
+#### The escalation ladder, and where it currently stops
+
+A later session drove this further and the news is worse: **the reflash stopped
+working too.** Everything below was tried against one live wedge, in order, with
+the device's own console readable throughout and reporting `usb link: up`,
+`ncm iface: registered`, `stall=0`:
+
+| rung | result |
+|---|---|
+| `Restart-NetAdapter` + static IP (`desktop/nic-restart.ps1`, admin) | no |
+| firmware 3 s USB detach (`x`) | no |
+| physical unplug / replug | recovered **once**, then no |
+| reflash, ~12 s parked in ROM | **no** - this used to work every time |
+| `Disable-PnpDevice` / `Enable-PnpDevice` | no |
+| `pnputil /remove-device` + `/scan-devices` (`desktop/nic-rebuild.ps1`) | no |
+
+The host side is nominally perfect while it fails: driver `UsbNcm.sys`
+10.0.26100.8972 from Microsoft, `DEVPKEY_Device_ProblemCode = 0`, INF
+`usbncm.inf` - so the Zadig/WinUSB hijack the custom PID exists to dodge is not
+what this is. What is wrong is narrower than that:
+
+```
+Status : Disconnected   MediaConnectionState : Unknown   LinkSpeed : 0 bps
+192.168.4.50/24  Manual  AddressState : Tentative
+```
+
+`MediaConnectionState: Unknown` means the miniport **never received the NCM
+`NETWORK_CONNECTION` notification**. When the link is healthy the same adapter
+reads `Connected / 12 Mbps`, which is a `CONNECTION_SPEED_CHANGE` value, so the
+device does send them - just not after a wedge. That notification belongs to
+TinyUSB's `ncm_device.c`, which exposes no API to re-assert it, and the Arduino
+package ships only the headers with the driver precompiled. **There is no
+device-side lever for it from this project.** The firmware's remaining lever is
+the detach, which is why `kBounceDetachMs` is now 12 s rather than 3 - matched
+to the reflash that used to be the only cure.
+
+The surviving hypothesis is that the wedge lives in the **Windows adapter
+instance**, not in the device: `pnputil /remove-device` was followed by the
+adapter returning at the *same* `InterfaceIndex`, because the instance path is
+derived from the bus location and the MAC, and both are stable across a
+reflash - `derive_macs()` seeds from `ESP_MAC_WIFI_STA`. The cheap test costs no
+code: **plug the node into a different USB port**, which changes the instance
+path. If that comes up `Connected`, rotating the advertised MAC becomes a real
+device-side cure; until it is tested, adding that lever would be guessing.
+
+Still missing, and worth capturing next time it wedges: a console reading taken
+**with traffic flowing**, which separates the two shapes in `ncm.h` - stalls
+climbing (REFUSES, curable by the bounce) from a host silently discarding
+(ACCEPTS, not). That needs the DevKitC's **UART port plugged in as well**, as
+`platformio.ini` says: reading the native CDC is fine for `i` and `x`, but it is
+the same cable that disappears during the failure.
+
+#### The node's own status LED
+
+The DevKitC's single WS2812 on GPIO48 now carries the one fact an operator
+cannot read from the laptop while looking at the aircraft: **green once the
+Tello is associated with the soft-AP and holds a lease, red until then.**
+
+It reports the drone's half of the path only. The USB half has a whole screen
+devoted to it, and a two-colour LED trying to say both would say neither. The
+condition is `shuttle::tello_ip() != 0` rather than `clients() != 0` on purpose:
+an associated station with no address yet cannot be talked to, so calling that
+green would be a claim the bridge cannot back - the gap is one DHCP exchange
+wide. `print_info()` prints the same derivation on the `i` line, beside the
+lease it comes from, so a green LED with no lease would be visible as the
+contradiction it is.
+
+Painted once in `setup()` before the first `loop()`, because an unlit LED and a
+dead board look identical. Repainted only on change: `rgbLedWrite()` bit-bangs
+the WS2812 with interrupts masked, and `loop()` runs every 5 ms.
+
 **A drone that needs a power cycle now says so.** `ensure_stream_flowing` has
 always ended with `no video after three streamon attempts - power-cycle the
 Tello` when `command` is answered and three `streamoff`/`streamon` cycles

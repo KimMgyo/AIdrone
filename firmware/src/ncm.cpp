@@ -184,16 +184,35 @@ bool g_tx_blocked = false; // guarded by g_lock: g_pending is stuck on a busy NT
 // is already far outside anything a healthy link does.
 constexpr uint32_t kStallRunLimit = 1000;
 
-// How long to hold the USB detach in recover_link(). See the comment there: this
-// is a measured value, not a guess -- 50 ms was too short to work at all.
-constexpr uint32_t kBounceDetachMs = 3000;
+// How long recover_link() holds the USB detach. A measured value, not a guess.
+//
+// Measured, in the order tried: a 50 ms bounce leaves Windows holding the same
+// wedged NIC instance - the device re-enumerates, PnP reports the NCM function
+// OK, and the adapter stays Disconnected / 0 bps. `ESP.restart()`: the same.
+// `Restart-NetAdapter` (desktop/nic-restart.ps1, admin): the same, even against
+// a freshly restarted device. A 3 s bounce: the same, re-confirmed against a
+// live wedge where the device reported `usb=up` with zero stalls throughout.
+// The two combined: the same.
+//
+// The ONE thing that ever worked is a reflash, every time - and what a reflash
+// does that none of the above does is park the board in ROM, with no NCM
+// function on the bus at all, for **~12 s**. Long absence is the only variable
+// that correlates with the cure, so this is set to match it rather than to be
+// merely longer than a USB debounce.
+//
+// Stalling tud_task() while detached costs nothing: there is no USB to service
+// until we reconnect.
+constexpr uint32_t kBounceDetachMs = 12000;
 
-// Every cure shares one cooldown, because the cure is a 3 s outage that the host
-// announces with a device-disconnect chime. A watchdog that treats a condition
-// its bounce cannot fix -- a host with nothing draining the NIC -- turns into an
-// endless detach/attach cycle that is worse than the stall it is treating. One
-// bounce per window, whoever asks.
-constexpr uint32_t kBounceCooldownMs = 30000;
+// Every cure shares one cooldown, because the cure is a multi-second outage that
+// the host announces with a device-disconnect chime. A watchdog that treats a
+// condition its bounce cannot fix -- a host with nothing draining the NIC --
+// turns into an endless detach/attach cycle that is worse than the stall it is
+// treating. One bounce per window, whoever asks.
+//
+// Expressed relative to the detach so the two cannot drift apart: what matters
+// is the LIVE time between bounces, and a longer detach must not eat into it.
+constexpr uint32_t kBounceCooldownMs = kBounceDetachMs + 30000;
 uint32_t g_last_bounce_ms = 0;
 
 // Runs in the TinyUSB task.
@@ -215,14 +234,7 @@ void recover_link() {
   g_pending = 0;
   g_stall_run = 0;
 
-  // The detach must be LONG. Measured: a 50 ms bounce leaves Windows holding the
-  // same wedged NIC instance -- the device re-enumerates, PnP reports the NCM
-  // function OK, and the adapter stays Disconnected / 0 bps. The only cure that
-  // ever worked was a reflash, where esptool parks the board in ROM for ~12 s.
-  // So make the absence unmistakable: 3 s is far longer than any USB debounce
-  // and forces the host to tear the NIC down before it is offered again.
-  // Stalling tud_task() while detached costs nothing -- there is no USB to
-  // service until we reconnect.
+  // Long, deliberately: see kBounceDetachMs.
   tud_disconnect();
   vTaskDelay(pdMS_TO_TICKS(kBounceDetachMs));
   tud_connect();
