@@ -236,6 +236,9 @@ export function installStation(mount: HTMLElement, deps: StationDeps): Station {
 
       <div class="flex-1 min-w-[8px]"></div>
 
+      <div class="flex flex-none items-center font-mono text-[11.5px] text-dim tracking-[.05em]">10704 김민교</div>
+
+      <div class="flex-1 min-w-[8px]"></div>
       <div class="flex flex-none items-center gap-[5px]">
         <button data-k="tg-left" type="button" title="좌측 패널 (Ctrl+B)" class="${TOGGLE}">
           <div class="relative w-[15px] h-[11px] border border-[#7C848F] rounded-[1px]">
