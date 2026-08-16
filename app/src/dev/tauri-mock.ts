@@ -64,6 +64,10 @@ type ChannelLike = { onmessage?: (message: unknown) => void };
  */
 const params = (): URLSearchParams => new URLSearchParams(location.search);
 const flag = (name: string): boolean => params().get(name) === "1";
+const demoMode = (): "person" | "marker" | null => {
+  const d = params().get("demo");
+  return d === "person" || d === "marker" ? d : null;
+};
 const number = (name: string, fallback: number): number => {
   // `Number(null)` is 0, so an absent flag would read as a real zero - which is
   // how the battery first came up empty here.
@@ -164,10 +168,13 @@ function startVideo(current: Session, units: Uint8Array[]): void {
   let cursor = 0;
   let frames = 0;
   let bytes = 0;
-  // The picture stopping mid-session is a first-class state now - it is what
-  // the supervisor calls offline - so the mock has to be able to produce it.
-  // Frames stop; the bulk stream, the state stream and the session all stay
-  // up, which is exactly the case a link-level silence check cannot see.
+  const demo = demoMode();
+  if (demo !== null) {
+    const demoImg = new Image();
+    demoImg.src = demo === "person" ? "/demo/person.png" : "/demo/marker.png";
+    (window as unknown as { __DEMO_IMAGE__?: HTMLImageElement }).__DEMO_IMAGE__ = demoImg;
+  }
+
   const stallAt = number("stall", 0);
   const startedAt = performance.now();
 
@@ -193,29 +200,72 @@ function startVideo(current: Session, units: Uint8Array[]): void {
 }
 
 function startState(current: Session): void {
+  const demo = demoMode();
   current.timers.push(
     window.setInterval(() => {
       flightSeconds += 1 / STATE_HZ;
       const t = flightSeconds;
-      send(current.drone, {
-        recvEpochUs: Date.now() * 1000,
-        bat: Math.round(battery),
-        h: Math.round(120 + 18 * Math.sin(t / 3)),
-        tof: Math.round(130 + 18 * Math.sin(t / 3)),
-        baro: 404.7 + Math.sin(t / 5),
-        time: Math.floor(t),
-        pitch: Math.round(6 * Math.sin(t / 2)),
-        roll: Math.round(5 * Math.cos(t / 2.5)),
-        yaw: Math.round(40 * Math.sin(t / 8)),
-        vgx: Math.round(12 * Math.sin(t / 1.5)),
-        vgy: Math.round(9 * Math.cos(t / 1.7)),
-        vgz: Math.round(4 * Math.sin(t / 2.3)),
-        templ: 41,
-        temph: 43,
-        agx: Math.round(20 * Math.sin(t)),
-        agy: Math.round(20 * Math.cos(t)),
-        agz: -1000,
-      });
+      if (demo === "person") {
+        send(current.drone, {
+          recvEpochUs: Date.now() * 1000,
+          bat: 84,
+          h: 118,
+          tof: 124,
+          baro: 122.5,
+          time: 114 + Math.floor(t),
+          pitch: 2,
+          roll: -1,
+          yaw: -14,
+          vgx: 0,
+          vgy: 1,
+          vgz: 0,
+          templ: 41,
+          temph: 43,
+          agx: 2,
+          agy: 1,
+          agz: -1000,
+        });
+      } else if (demo === "marker") {
+        send(current.drone, {
+          recvEpochUs: Date.now() * 1000,
+          bat: 79,
+          h: 92,
+          tof: 96,
+          baro: 94.2,
+          time: 86 + Math.floor(t),
+          pitch: 1,
+          roll: 0,
+          yaw: -8,
+          vgx: 0,
+          vgy: 0,
+          vgz: 0,
+          templ: 42,
+          temph: 44,
+          agx: 1,
+          agy: 0,
+          agz: -1000,
+        });
+      } else {
+        send(current.drone, {
+          recvEpochUs: Date.now() * 1000,
+          bat: Math.round(battery),
+          h: Math.round(120 + 18 * Math.sin(t / 3)),
+          tof: Math.round(130 + 18 * Math.sin(t / 3)),
+          baro: 404.7 + Math.sin(t / 5),
+          time: Math.floor(t),
+          pitch: Math.round(6 * Math.sin(t / 2)),
+          roll: Math.round(5 * Math.cos(t / 2.5)),
+          yaw: Math.round(40 * Math.sin(t / 8)),
+          vgx: Math.round(12 * Math.sin(t / 1.5)),
+          vgy: Math.round(9 * Math.cos(t / 1.7)),
+          vgz: Math.round(4 * Math.sin(t / 2.3)),
+          templ: 41,
+          temph: 43,
+          agx: Math.round(20 * Math.sin(t)),
+          agy: Math.round(20 * Math.cos(t)),
+          agz: -1000,
+        });
+      }
     }, 1000 / STATE_HZ),
   );
 
@@ -227,9 +277,33 @@ function startState(current: Session): void {
   }
 }
 
-/** A marker that drifts, so the overlay and the follow panel have something
- *  that moves. Corner order matches the detector's: clockwise from top-left. */
 function arucoEvent(t: number): unknown {
+  const demo = demoMode();
+  if (demo === "marker") {
+    return {
+      kind: "aruco",
+      recvEpochUs: Date.now() * 1000,
+      width: WIDTH,
+      height: HEIGHT,
+      family: "ARUCO_MIP_36h12",
+      state: "ready",
+      analysisMs: 1.4,
+      markers: [
+        {
+          id: 7,
+          hammingDistance: 0,
+          decisionMargin: 74.5,
+          corners: [
+            { x: 405, y: 384 },
+            { x: 564, y: 384 },
+            { x: 564, y: 543 },
+            { x: 405, y: 543 },
+          ],
+        },
+      ],
+    };
+  }
+
   const cx = WIDTH / 2 + 180 * Math.sin(t / 2.2);
   const cy = HEIGHT / 2 + 90 * Math.cos(t / 3.1);
   const half = 70 + 12 * Math.sin(t / 1.7);
@@ -256,6 +330,25 @@ function arucoEvent(t: number): unknown {
 }
 
 function personEvent(t: number): unknown {
+  const demo = demoMode();
+  if (demo === "person") {
+    return {
+      kind: "person",
+      recvEpochUs: Date.now() * 1000,
+      width: WIDTH,
+      height: HEIGHT,
+      analysisMs: 8.6,
+      detections: [
+        { trackId: 3, confidence: 0.92, x: 435, y: 468, width: 85, height: 165 },
+        { trackId: 1, confidence: 0.89, x: 360, y: 472, width: 82, height: 176 },
+        { trackId: 5, confidence: 0.86, x: 638, y: 420, width: 66, height: 150 },
+        { trackId: 2, confidence: 0.81, x: 554, y: 282, width: 48, height: 96 },
+        { trackId: 8, confidence: 0.78, x: 582, y: 295, width: 45, height: 85 },
+        { trackId: 12, confidence: 0.74, x: 120, y: 520, width: 75, height: 85 },
+      ],
+    };
+  }
+
   const x = WIDTH / 2 - 90 + 150 * Math.sin(t / 4);
   return {
     kind: "person",
@@ -272,6 +365,10 @@ function personEvent(t: number): unknown {
 
 function startVision(current: Session): void {
   let t = 0;
+  const demo = demoMode();
+  if (demo === "person") mode = "person";
+  else if (demo === "marker") mode = "aruco";
+
   current.timers.push(
     window.setInterval(() => {
       t += 1 / VISION_HZ;
@@ -439,5 +536,142 @@ window.__TAURI_INTERNALS__ = {
 
 console.info(
   "[dev] Tauri IPC mocked - drone, video and copilot are fake.",
-  "Flags: ?update=1 ?empty=1 ?silent=8 ?stall=6 ?nonode=1 ?wedged=1 ?bat=14",
+  "Flags: ?demo=person ?demo=marker ?update=1 ?empty=1 ?silent=8 ?stall=6 ?nonode=1 ?wedged=1 ?bat=14",
 );
+
+function initDemoUI(): void {
+  const demo = demoMode();
+  if (demo === null) return;
+
+  window.setTimeout(() => {
+    // 1. Switch mode
+    const modeBtn = document.querySelector<HTMLButtonElement>(`[data-k="mode-${demo === "person" ? "person" : "aruco"}"]`);
+    modeBtn?.click();
+
+    // 2. Timeline
+    const timelineList = document.querySelector<HTMLElement>('[data-k="list"]');
+    const timelineCount = document.querySelector<HTMLElement>('[data-k="count"]');
+    if (timelineList !== null) {
+      timelineList.innerHTML = "";
+      const events = demo === "person" ? [
+        { time: "15:40:12", tag: "LINK", tagCls: "bg-accent text-accent2", desc: "세션 시작 · Tello SDK 2.0 (USB Bulk)" },
+        { time: "15:40:15", tag: "CMD", tagCls: "bg-accent text-accent2", desc: "takeoff" },
+        { time: "15:40:18", tag: "EXEC", tagCls: "bg-ok text-ok2", desc: "이륙 완료 · 고도 1.18m 호버링" },
+        { time: "15:40:22", tag: "MODE", tagCls: "bg-ok text-ok2", desc: "사람 추적 모드 전환 (YOLOv8n)" },
+        { time: "15:40:26", tag: "TARGET", tagCls: "bg-ok text-ok2", desc: "Track 3 락온 · 자동 비행 추적 활성화" },
+        { time: "15:40:45", tag: "COPILOT", tagCls: "bg-accent text-accent2", desc: "음성 지시 수행 완료 · 목표 추적 유지 중" },
+      ] : [
+        { time: "15:38:04", tag: "LINK", tagCls: "bg-accent text-accent2", desc: "세션 시작 · Tello SDK 2.0 (USB Bulk)" },
+        { time: "15:38:08", tag: "CMD", tagCls: "bg-accent text-accent2", desc: "takeoff" },
+        { time: "15:38:12", tag: "EXEC", tagCls: "bg-ok text-ok2", desc: "이륙 완료 · 고도 0.92m 호버링" },
+        { time: "15:38:16", tag: "MODE", tagCls: "bg-warn text-warn", desc: "마커 추적 모드 전환 (ARUCO_MIP_36h12)" },
+        { time: "15:38:20", tag: "TARGET", tagCls: "bg-ok text-ok2", desc: "ArUco ID 7 락온 (24cm) · 거리 1.2m 유지" },
+        { time: "15:38:35", tag: "COPILOT", tagCls: "bg-accent text-accent2", desc: "사용자 지시 완료 · 마커 호버링 유지" },
+      ];
+      if (timelineCount !== null) timelineCount.textContent = `${events.length} actions`;
+      for (const ev of events) {
+        const item = document.createElement("div");
+        item.className = "relative flex items-start gap-[11px] pb-[10px]";
+        item.innerHTML = `
+          <div class="absolute left-[5px] top-[14px] bottom-0 w-px bg-[#1F252D]"></div>
+          <div class="mt-[4px] h-[11px] w-[11px] flex-none rounded-full border-2 border-[#12161B] ${ev.tagCls.split(" ")[0]}"></div>
+          <div class="flex min-w-0 flex-1 flex-col gap-[2px]">
+            <div class="flex items-center gap-[6px]">
+              <span class="font-mono text-[10px] text-dim3">${ev.time}</span>
+              <span class="rounded-[2px] px-[4px] py-[0.5px] font-mono text-[9px] font-semibold ${ev.tagCls}">${ev.tag}</span>
+            </div>
+            <div class="font-mono text-[11px] leading-[1.5] text-ink2">${ev.desc}</div>
+          </div>
+        `;
+        timelineList.append(item);
+      }
+    }
+
+    // 3. Copilot Chat
+    const chat = document.querySelector<HTMLElement>('[data-k="copilot-chat"]');
+    if (chat !== null) {
+      chat.innerHTML = "";
+      const userText = demo === "person"
+        ? "이륙해서 1m 고도 유지하고, 전방에 보이는 사람을 찾아서 자동 추적해줘."
+        : "전방에 배치된 ArUco 마커를 감지하고 120cm 거리를 유지하며 호버링해줘.";
+      const thinkingTitle = demo === "person"
+        ? "상태 확인 및 타겟 락온 계획 수립"
+        : "ArUco 마커 감지 및 호버링 거리 제어";
+      const thinkingBody = demo === "person"
+        ? "1. 배터리 84%, 고도 1.18m (안정 비행 중)\n2. 전방 경로 상 다수 보행자 감지 (총 6명 확인)\n3. 중앙 보행자 Track 3 (신뢰도 92%, 거리 2.1m) 타겟 선정\n4. lock(id: 3) 호출 및 사람 추적 모드 유지"
+        : "1. 배터리 79%, 고도 0.92m (안정 비행 중)\n2. 전방 삼각대 장착 ArUco 마커 ID 7 감지 (크기 24cm, 74.5dB)\n3. 현재 거리 1.25m → 목표 거리 120cm 도달\n4. lock(id: 7) 및 TRACK_DIST_GAIN 유지";
+      const assistantText = demo === "person"
+        ? "이륙 후 전방 2.1m 거리의 보행자(Track 3)를 감지하여 락온을 완료했습니다. 자동 추적 모드를 활성화하여 거리를 유지하며 비행 중입니다. 배터리 잔량은 84%입니다."
+        : "전방 삼각대에 부착된 ArUco 마커(ID 7, 24cm)를 인식하여 락온했습니다. 목표 거리 120cm를 유지하며 안정적으로 호버링 비행 중입니다.";
+      const chips = demo === "person"
+        ? ["observe", "fly takeoff", "set_mode person", "lock 3", "observe", "done"]
+        : ["observe", "fly takeoff", "set_mode aruco", "lock 7", "wait 5", "observe", "done"];
+
+      const userRow = document.createElement("div");
+      userRow.className = "flex w-full justify-end";
+      userRow.innerHTML = `
+        <div class="max-w-[82%] rounded-[3px] border border-[rgba(91,200,245,.32)] bg-[rgba(91,200,245,.14)] px-[12px] py-[9px] text-[12.5px] leading-[1.6] text-[#DCEFFA]">
+          ${userText}
+        </div>`;
+      chat.append(userRow);
+
+      const respRow = document.createElement("div");
+      respRow.className = "flex w-full flex-col items-start gap-[4px]";
+      respRow.innerHTML = `
+        <div class="my-[3px] w-full rounded-[2px] border border-line2 bg-key/40">
+          <div class="flex w-full items-baseline gap-[6px] px-[7px] py-[4px] text-left">
+            <span class="flex-none text-[9px] text-accent">▾</span>
+            <span class="flex-none text-[9.5px] tracking-[.12em] text-accent">THINKING</span>
+            <span class="min-w-0 flex-1 truncate text-[10px] text-dim3">${thinkingTitle}</span>
+          </div>
+          <div class="whitespace-pre-wrap break-words px-[9px] pb-[6px] font-mono text-[10px] leading-[1.55] text-dim2">${thinkingBody}</div>
+        </div>
+        <div class="max-w-[90%] rounded-[3px] border border-[#212832] bg-tile px-[12px] py-[9px] text-left">
+          <span class="block whitespace-pre-wrap text-[12.5px] leading-[1.6] text-ink2">${assistantText}</span>
+          <span class="mt-[6px] flex flex-wrap items-center gap-[4px]">
+            ${chips.map((c) => `<span class="rounded-[2px] border border-line3 bg-key px-[5px] py-[1px] font-mono text-[9px] text-dim2">${c}</span>`).join("")}
+          </span>
+        </div>`;
+      chat.append(respRow);
+    }
+
+    // 4. UDP Console
+    const consoleBox = document.querySelector<HTMLElement>('[data-k="log"]');
+    if (consoleBox !== null) {
+      consoleBox.innerHTML = "";
+      const lines = demo === "person" ? [
+        { time: "15:40:12", kind: "info", text: "AIdrone Station · 15:40:12" },
+        { time: "15:40:12", kind: "tx", text: "command" },
+        { time: "15:40:12", kind: "rx", text: "ok" },
+        { time: "15:40:13", kind: "tx", text: "streamon" },
+        { time: "15:40:13", kind: "rx", text: "ok" },
+        { time: "15:40:14", kind: "info", text: "session up with painted video in 1420 ms" },
+        { time: "15:40:15", kind: "tx", text: "takeoff" },
+        { time: "15:40:18", kind: "rx", text: "ok" },
+        { time: "15:40:26", kind: "info", text: "[follow] target locked: track 3 (dist 2.1m)" },
+        { time: "15:40:40", kind: "tx", text: "rc 2 8 0 4" },
+      ] : [
+        { time: "15:38:04", kind: "info", text: "AIdrone Station · 15:38:04" },
+        { time: "15:38:04", kind: "tx", text: "command" },
+        { time: "15:38:04", kind: "rx", text: "ok" },
+        { time: "15:38:05", kind: "tx", text: "streamon" },
+        { time: "15:38:05", kind: "rx", text: "ok" },
+        { time: "15:38:06", kind: "info", text: "session up with painted video in 1310 ms" },
+        { time: "15:38:08", kind: "tx", text: "takeoff" },
+        { time: "15:38:12", kind: "rx", text: "ok" },
+        { time: "15:38:20", kind: "info", text: "[follow] marker 7 locked: size 24cm, target dist 120cm" },
+        { time: "15:38:30", kind: "tx", text: "rc 0 4 0 2" },
+      ];
+      for (const l of lines) {
+        const r = document.createElement("div");
+        r.className = "flex items-baseline gap-[8px] py-[1px] font-mono text-[11px]";
+        r.innerHTML = `<span class="flex-none text-dim3">${l.time}</span><span class="${l.kind === "tx" ? "text-accent" : l.kind === "rx" ? "text-ok" : "text-dim"}">${l.kind === "tx" ? "→ bulk OUT : " : l.kind === "rx" ? "← bulk IN  : " : ""}${l.text}</span>`;
+        consoleBox.append(r);
+      }
+    }
+  }, 400);
+}
+
+if (typeof window !== "undefined") {
+  initDemoUI();
+}

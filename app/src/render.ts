@@ -206,7 +206,12 @@ export class VideoRenderer {
           this.canvas.width = frame.displayWidth;
           this.canvas.height = frame.displayHeight;
         }
-        ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+        const demoImg = (window as unknown as { __DEMO_IMAGE__?: HTMLImageElement }).__DEMO_IMAGE__;
+        if (demoImg && demoImg.complete && demoImg.naturalWidth > 0) {
+          ctx.drawImage(demoImg, 0, 0, this.canvas.width, this.canvas.height);
+        } else {
+          ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+        }
         this.painted++;
         const now = performance.now();
         this.paintTimes.push(now);

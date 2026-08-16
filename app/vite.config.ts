@@ -26,6 +26,30 @@ function sampleStream(): Plugin {
           },
         );
       });
+      server.middlewares.use("/demo/person.png", (_request, response) => {
+        readFile(new URL("../demo/사람 추적 데모.png", import.meta.url)).then(
+          (bytes) => {
+            response.setHeader("Content-Type", "image/png");
+            response.end(bytes);
+          },
+          (error: unknown) => {
+            response.statusCode = 404;
+            response.end(String(error));
+          },
+        );
+      });
+      server.middlewares.use("/demo/marker.png", (_request, response) => {
+        readFile(new URL("../demo/마커 추적 데모.png", import.meta.url)).then(
+          (bytes) => {
+            response.setHeader("Content-Type", "image/png");
+            response.end(bytes);
+          },
+          (error: unknown) => {
+            response.statusCode = 404;
+            response.end(String(error));
+          },
+        );
+      });
     },
   };
 }
